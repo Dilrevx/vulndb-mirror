@@ -33,6 +33,15 @@ def _expand_neighbor_pages(pages: list[int], *, max_offset: int = 1) -> list[int
     return sorted(out)
 
 
+def _escape_fts_term(term: str) -> str:
+    term = term.replace("\\", "\\\\").replace('"', '""').strip()
+    return f'"{term}"'
+
+
+def _build_fts_match_query(terms: list[str]) -> str:
+    return " AND ".join(_escape_fts_term(term) for term in terms if term)
+
+
 class RawRepository(ABC):
     @abstractmethod
     def upsert_raw(self, entry: RawAVDEntry, *, page: int) -> None:
@@ -350,6 +359,7 @@ class FileRawRepository(RawRepository):
 class SqliteRawRepository(RawRepository):
     def __init__(self, sqlite_path: str) -> None:
         self.sqlite_path = sqlite_path
+        self._search_index_enabled = False
         Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -372,16 +382,10 @@ class SqliteRawRepository(RawRepository):
                 """
             )
             conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS page_checkpoints (
-                    page INTEGER PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    entry_count INTEGER NOT NULL,
-                    has_next INTEGER NOT NULL,
-                    error TEXT,
-                    updated_at TEXT NOT NULL
-                )
-                """
+                "CREATE INDEX IF NOT EXISTS idx_raw_entries_modified_date_cve_id ON raw_entries(modified_date DESC, cve_id DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_raw_entries_page ON raw_entries(page)"
             )
             conn.execute(
                 """
@@ -391,8 +395,32 @@ class SqliteRawRepository(RawRepository):
                 )
                 """
             )
+            self._search_index_enabled = self._ensure_search_index(conn)
             conn.commit()
         self._refresh_page_tracking_if_stale()
+
+    def _ensure_search_index(self, conn: sqlite3.Connection) -> bool:
+        try:
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS raw_entries_fts USING fts5(cve_id, payload)"
+            )
+        except sqlite3.OperationalError:
+            return False
+
+        raw_count = conn.execute("SELECT COUNT(1) AS c FROM raw_entries").fetchone()["c"]
+        fts_count = conn.execute("SELECT COUNT(1) AS c FROM raw_entries_fts").fetchone()["c"]
+        if int(raw_count) != int(fts_count):
+            conn.execute("DELETE FROM raw_entries_fts")
+            cursor = conn.execute("SELECT rowid, cve_id, payload FROM raw_entries ORDER BY rowid ASC")
+            while True:
+                rows = cursor.fetchmany(1000)
+                if not rows:
+                    break
+                conn.executemany(
+                    "INSERT INTO raw_entries_fts(rowid, cve_id, payload) VALUES(?, ?, ?)",
+                    [(row["rowid"], row["cve_id"], row["payload"]) for row in rows],
+                )
+        return True
 
     def _refresh_page_tracking_if_stale(self) -> None:
         today = _utc_today()
@@ -420,10 +448,6 @@ class SqliteRawRepository(RawRepository):
                     "INSERT INTO raw_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     ("resume_hint_pages", json.dumps(resume_hint_pages)),
                 )
-            conn.execute(
-                "INSERT INTO raw_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                ("page_tracking_date", today),
-            )
             conn.execute(
                 "INSERT INTO raw_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 ("updated_at", now_iso()),
@@ -464,6 +488,16 @@ class SqliteRawRepository(RawRepository):
                 """,
                 (entry.cve_id, modified, page, payload, now_iso()),
             )
+            if self._search_index_enabled:
+                rowid = conn.execute(
+                    "SELECT rowid FROM raw_entries WHERE cve_id=?",
+                    (entry.cve_id,),
+                ).fetchone()[0]
+                conn.execute("DELETE FROM raw_entries_fts WHERE rowid=?", (rowid,))
+                conn.execute(
+                    "INSERT INTO raw_entries_fts(rowid, cve_id, payload) VALUES(?, ?, ?)",
+                    (rowid, entry.cve_id, payload),
+                )
             conn.commit()
 
         ref = entry.modified_date or entry.crawled_at
@@ -505,11 +539,18 @@ class SqliteRawRepository(RawRepository):
         if modified_to:
             where.append("(modified_date IS NULL OR modified_date <= ?)")
             args.append(modified_to)
-        for _ in terms:
-            where.append("(LOWER(cve_id) LIKE ? OR LOWER(payload) LIKE ?)")
-        for term in terms:
-            like = f"%{term}%"
-            args.extend([like, like])
+        if terms:
+            if self._search_index_enabled:
+                where.append(
+                    "rowid IN (SELECT rowid FROM raw_entries_fts WHERE raw_entries_fts MATCH ?)"
+                )
+                args.append(_build_fts_match_query(terms))
+            else:
+                for _ in terms:
+                    where.append("(LOWER(cve_id) LIKE ? OR LOWER(payload) LIKE ?)")
+                for term in terms:
+                    like = f"%{term}%"
+                    args.extend([like, like])
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
         with self._connect() as conn:

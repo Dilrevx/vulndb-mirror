@@ -1,6 +1,5 @@
 "use client";
-
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type RawItem = {
     cve_id: string;
@@ -83,8 +82,11 @@ const DEFAULT_FILTERS: FilterDraft = {
     to: "",
 };
 
-async function apiGet<T>(path: string): Promise<T> {
-    const response = await fetch(`${API_BASE}${path}`);
+async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
+    const response = await fetch(`${API_BASE}${path}`, {
+        cache: "no-store",
+        ...init,
+    });
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
     return (await response.json()) as T;
 }
@@ -113,7 +115,15 @@ function normalizeRule(value: string | null): PoCRuleMode {
     return "balanced";
 }
 
+function normalizeSearchInput(raw: string): string {
+    return raw
+        .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFE58\uFE63\uFF0D]/g, "-")
+        .replace(/[\uFF1A\uFE55\u2236]/g, ":")
+        .trim();
+}
+
 function parseSmartSearch(raw: string): SmartSearchTokens {
+    raw = normalizeSearchInput(raw);
     const result: SmartSearchTokens = { text: [], cve: "", cwe: "", severity: "", patch: "all", poc: "all" };
     const tokens = raw.trim().split(/\s+/).filter(Boolean);
     for (const token of tokens) {
@@ -217,6 +227,8 @@ export default function Home() {
     const [checkpoints, setCheckpoints] = useState<CheckpointsResp | null>(null);
     const [retryPages, setRetryPages] = useState("");
     const [retryResult, setRetryResult] = useState("{}");
+    const querySeqRef = useRef(0);
+    const queryAbortRef = useRef<AbortController | null>(null);
 
     const searchTokens = useMemo(() => parseSmartSearch(applied.search), [applied.search]);
 
@@ -276,21 +288,30 @@ export default function Home() {
     const hasUnappliedChanges = JSON.stringify(draft) !== JSON.stringify(applied);
 
     async function runQuery(targetPage = page, targetPageSize = pageSize, filters = applied): Promise<void> {
+        const requestSeq = ++querySeqRef.current;
+        queryAbortRef.current?.abort();
+        const controller = new AbortController();
+        queryAbortRef.current = controller;
+        setQuery(null);
         setLoading(true);
         setError("");
         try {
             const params = new URLSearchParams({ page: String(targetPage), page_size: String(targetPageSize) });
-            if (filters.search.trim()) params.set("q", filters.search.trim());
+            const normalizedSearch = normalizeSearchInput(filters.search);
+            if (normalizedSearch) params.set("q", normalizedSearch);
             if (filters.showAdvanced && filters.from) params.set("modified_from", filters.from);
             if (filters.showAdvanced && filters.to) params.set("modified_to", filters.to);
-            const data = await apiGet<QueryResp>(`/raw?${params.toString()}`);
+            const data = await apiGet<QueryResp>(`/raw?${params.toString()}`, { signal: controller.signal });
+            if (requestSeq !== querySeqRef.current) return;
             setQuery(data);
             setPage(data.page);
             setPageSize(data.page_size);
         } catch (e) {
+            if ((e as DOMException | Error | undefined)?.name === "AbortError") return;
+            if (requestSeq !== querySeqRef.current) return;
             setError(String(e));
         } finally {
-            setLoading(false);
+            if (requestSeq === querySeqRef.current) setLoading(false);
         }
     }
 
@@ -318,25 +339,31 @@ export default function Home() {
 
         let mounted = true;
         void (async () => {
+            const requestSeq = ++querySeqRef.current;
+            queryAbortRef.current?.abort();
+            const controller = new AbortController();
+            queryAbortRef.current = controller;
             setLoading(true);
             setError("");
             try {
                 const safePage = Math.max(1, initPage || 1);
                 const safeSize = [10, 20, 50, 100].includes(initPageSize) ? initPageSize : 20;
                 const queryParams = new URLSearchParams({ page: String(safePage), page_size: String(safeSize) });
-                if (initFilters.search.trim()) queryParams.set("q", initFilters.search.trim());
+                const normalizedSearch = normalizeSearchInput(initFilters.search);
+                if (normalizedSearch) queryParams.set("q", normalizedSearch);
                 if (initFilters.showAdvanced && initFilters.from) queryParams.set("modified_from", initFilters.from);
                 if (initFilters.showAdvanced && initFilters.to) queryParams.set("modified_to", initFilters.to);
-                const data = await apiGet<QueryResp>(`/raw?${queryParams.toString()}`);
-                if (!mounted) return;
+                const data = await apiGet<QueryResp>(`/raw?${queryParams.toString()}`, { signal: controller.signal });
+                if (!mounted || requestSeq !== querySeqRef.current) return;
                 setQuery(data);
                 setPage(data.page);
                 setPageSize(data.page_size);
             } catch (e) {
-                if (!mounted) return;
+                if ((e as DOMException | Error | undefined)?.name === "AbortError") return;
+                if (!mounted || requestSeq !== querySeqRef.current) return;
                 setError(String(e));
             } finally {
-                if (mounted) setLoading(false);
+                if (mounted && requestSeq === querySeqRef.current) setLoading(false);
             }
         })();
 
@@ -363,12 +390,14 @@ export default function Home() {
     }, [page, pageSize, applied, activeTab]);
 
     function resetDraftAndApply(): void {
+        setPage(1);
         setDraft(DEFAULT_FILTERS);
         setApplied(DEFAULT_FILTERS);
         void runQuery(1, pageSize, DEFAULT_FILTERS);
     }
 
     function applyDraft(): void {
+        setPage(1);
         setApplied(draft);
         void runQuery(1, pageSize, draft);
     }
@@ -675,15 +704,41 @@ function PageControls({
     onPage: (page: number) => void;
     onPageSize: (size: number) => void;
 }) {
+    const [pageInput, setPageInput] = useState(String(page));
+
+    useEffect(() => {
+        setPageInput(String(page));
+    }, [page]);
+
+    function jumpToPage(): void {
+        const parsed = Number(pageInput);
+        if (!Number.isInteger(parsed)) return;
+        onPage(Math.min(totalPages, Math.max(1, parsed)));
+    }
+
     return (
-        <div className="flex items-center gap-2">
-            <button className="rounded border border-slate-200 bg-white px-2 py-1 text-xs" onClick={() => onPage(Math.max(1, page - 1))}>上一页</button>
-            <button className="rounded border border-slate-200 bg-white px-2 py-1 text-xs" onClick={() => onPage(Math.min(totalPages, page + 1))}>下一页</button>
-            <select className="rounded border border-slate-200 bg-white px-2 py-1 text-xs" value={page} onChange={(e) => onPage(Number(e.target.value))}>
-                {Array.from({ length: totalPages }, (_, i) => i + 1).map((value) => (
-                    <option key={value} value={value}>第 {value} 页</option>
-                ))}
-            </select>
+        <div className="flex flex-wrap items-center gap-2">
+            <button className="rounded border border-slate-200 bg-white px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50" disabled={page <= 1} onClick={() => onPage(Math.max(1, page - 1))}>上一页</button>
+            <button className="rounded border border-slate-200 bg-white px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50" disabled={page >= totalPages} onClick={() => onPage(Math.min(totalPages, page + 1))}>下一页</button>
+            <label className="flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600">
+                <span>跳到</span>
+                <input
+                    className="w-16 border-0 bg-transparent p-0 text-center text-xs outline-none"
+                    inputMode="numeric"
+                    min={1}
+                    max={totalPages}
+                    type="number"
+                    value={pageInput}
+                    onChange={(e) => setPageInput(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                            jumpToPage();
+                        }
+                    }}
+                />
+                <span>/ {totalPages}</span>
+            </label>
+            <button className="rounded border border-slate-200 bg-white px-2 py-1 text-xs" onClick={jumpToPage}>前往</button>
             <select className="rounded border border-slate-200 bg-white px-2 py-1 text-xs" value={pageSize} onChange={(e) => onPageSize(Number(e.target.value))}>
                 <option value={10}>10/页</option>
                 <option value={20}>20/页</option>
