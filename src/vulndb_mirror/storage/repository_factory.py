@@ -11,12 +11,23 @@ from vulndb_mirror.storage.repositories import (
 )
 
 
-def build_raw_repository(settings: CrawlerSettings) -> RawRepository:
-    backend = settings.rawdb_storage_backend.lower()
-    data_dir = settings.data_dir
-    sqlite_path = settings.rawdb_sqlite_path or str(Path(data_dir) / "raw.db")
+def build_raw_repository(
+    settings: CrawlerSettings, *, data_dir: str | None = None
+) -> RawRepository:
+    """Build a :class:`RawRepository` from *settings*.
 
-    file_repo = FileRawRepository(data_dir=data_dir)
+    Args:
+        settings:  Active :class:`~vulndb_mirror.config.CrawlerSettings`.
+        data_dir:  Override the storage root directory.  When omitted,
+                   ``settings.data_dir`` is used.
+    """
+    backend = settings.rawdb_storage_backend.lower()
+    resolved_dir = data_dir if data_dir is not None else settings.data_dir
+    sqlite_path = settings.rawdb_sqlite_path or str(Path(resolved_dir) / "raw.db")
+    if data_dir is not None:
+        sqlite_path = str(Path(resolved_dir) / "raw.db")
+
+    file_repo = FileRawRepository(data_dir=resolved_dir)
     sqlite_repo = SqliteRawRepository(sqlite_path=sqlite_path)
 
     if backend == "file":

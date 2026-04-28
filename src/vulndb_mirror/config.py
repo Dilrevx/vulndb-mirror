@@ -170,6 +170,18 @@ class CrawlerSettings(BaseSettings):
         description="Subdirectory under data_dir for Step3 enriched YAML output",
     )
 
+    # Channel selection
+    channel: str = Field(
+        default="aliyun",
+        description="Active crawler channel: aliyun | trickest_cve",
+    )
+
+    # Trickest CVE channel settings
+    trickest_data_dir: str = Field(
+        default="./output/trickest_cve",
+        description="Data directory for the trickest_cve channel",
+    )
+
     # Logging
     log_dir: Optional[str] = Field(
         default="./logs",

@@ -12,6 +12,7 @@ from vulndb_mirror.config import CrawlerSettings
 from vulndb_mirror.server.api import create_app
 from vulndb_mirror.storage.ingest_service import RawIngestService
 from vulndb_mirror.storage.repository_factory import build_raw_repository
+from vulndb_mirror.storage.trickest_ingest_service import TrickestIngestService
 
 
 def _setup_logging(log_dir: str | None) -> None:
@@ -36,16 +37,33 @@ def _setup_logging(log_dir: str | None) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Aliyun crawler tools")
+    parser = argparse.ArgumentParser(description="Vulnerability DB mirror tools")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    crawl = sub.add_parser("crawl", help="run incremental crawl into raw storage")
-    crawl.add_argument("--start-page", type=int, default=None)
+    crawl = sub.add_parser("crawl", help="run incremental crawl / sync into raw storage")
+    crawl.add_argument(
+        "--channel",
+        default=None,
+        choices=["aliyun", "trickest_cve"],
+        help="data channel to crawl (default: value of CHANNEL env / 'aliyun')",
+    )
+    crawl.add_argument(
+        "--start-page",
+        type=int,
+        default=None,
+        help="(aliyun channel) start from this list page",
+    )
+    crawl.add_argument(
+        "--full",
+        action="store_true",
+        default=False,
+        help="(trickest_cve channel) re-process all files ignoring previous sync state",
+    )
 
-    retry = sub.add_parser("retry", help="retry explicit pages")
+    retry = sub.add_parser("retry", help="retry explicit pages (aliyun channel)")
     retry.add_argument("--pages", nargs="+", type=int, required=True)
 
-    sub.add_parser("gaps", help="show missing/failed page segments")
+    sub.add_parser("gaps", help="show missing/failed page segments (aliyun channel)")
     sub.add_parser("api", help="start FastAPI service")
     return parser
 
@@ -56,6 +74,20 @@ def main() -> None:
 
     settings = CrawlerSettings()
     _setup_logging(settings.log_dir)
+
+    # Resolve active channel: CLI flag > env var CHANNEL > settings default
+    channel = args.channel if hasattr(args, "channel") and args.channel else settings.channel
+
+    if args.command == "crawl" and channel == "trickest_cve":
+        repository = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
+        trickest_config = settings.to_crawl_config()
+        trickest_config.data_dir = settings.trickest_data_dir
+        service = TrickestIngestService(trickest_config, repository)
+        result = service.sync(full=args.full)
+        print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
+        return
+
+    # --- Aliyun channel (default) ----------------------------------------
     repository = build_raw_repository(settings)
     service = RawIngestService(settings.to_crawl_config(), repository)
 

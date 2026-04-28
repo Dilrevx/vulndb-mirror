@@ -42,6 +42,10 @@ class RawAVDEntry(BaseModel):
         default_factory=list,
         description="Subset of references that look like GitHub commits / PRs / issues",
     )
+    poc_repos: list[str] = Field(
+        default_factory=list,
+        description="GitHub repos known to reference or demonstrate this CVE (trickest channel)",
+    )
     detail_url: str = Field(default="", description="Full URL of the detail page")
 
     # ---- incremental bookkeeping --------------------------------------------
