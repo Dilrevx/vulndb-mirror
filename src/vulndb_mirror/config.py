@@ -173,13 +173,19 @@ class CrawlerSettings(BaseSettings):
     # Channel selection
     channel: str = Field(
         default="aliyun",
-        description="Active crawler channel: aliyun | trickest_cve",
+        description="Active crawler channel: aliyun | trickest_cve | cvelistv5",
     )
 
     # Trickest CVE channel settings
     trickest_data_dir: str = Field(
         default="./output/trickest_cve",
         description="Data directory for the trickest_cve channel",
+    )
+
+    # cvelistV5 channel settings
+    cvelistv5_data_dir: str = Field(
+        default="./output/cvelistv5",
+        description="Data directory for the cvelistv5 channel",
     )
 
     # Logging

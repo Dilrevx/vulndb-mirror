@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Aliyun Vulnerability Browser",
-  description: "Standalone browser for Aliyun RawDB vulnerabilities and checkpoints",
+  title: "VulnDB Mirror",
+  description: "Multi-channel vulnerability database browser",
 };
 
 export default function RootLayout({

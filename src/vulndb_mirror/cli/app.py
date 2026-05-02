@@ -13,6 +13,7 @@ from vulndb_mirror.server.api import create_app
 from vulndb_mirror.storage.ingest_service import RawIngestService
 from vulndb_mirror.storage.repository_factory import build_raw_repository
 from vulndb_mirror.storage.trickest_ingest_service import TrickestIngestService
+from vulndb_mirror.storage.cvelistv5_ingest_service import CvelistV5IngestService
 
 
 def _setup_logging(log_dir: str | None) -> None:
@@ -44,7 +45,7 @@ def _build_parser() -> argparse.ArgumentParser:
     crawl.add_argument(
         "--channel",
         default=None,
-        choices=["aliyun", "trickest_cve"],
+        choices=["aliyun", "trickest_cve", "cvelistv5"],
         help="data channel to crawl (default: value of CHANNEL env / 'aliyun')",
     )
     crawl.add_argument(
@@ -78,6 +79,38 @@ def main() -> None:
     # Resolve active channel: CLI flag > env var CHANNEL > settings default
     channel = args.channel if hasattr(args, "channel") and args.channel else settings.channel
 
+    # --- API server ----------------------------------------------------------
+    if args.command == "api":
+        aliyun_repo = build_raw_repository(settings)
+        trickest_repo = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
+        cvelistv5_repo = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
+
+        trickest_config = settings.to_crawl_config()
+        trickest_config.data_dir = settings.trickest_data_dir
+        cv5_config = settings.to_crawl_config()
+        cv5_config.data_dir = settings.cvelistv5_data_dir
+
+        repositories = {
+            "aliyun": aliyun_repo,
+            "trickest_cve": trickest_repo,
+            "cvelistv5": cvelistv5_repo,
+        }
+        services = {
+            "aliyun": RawIngestService(settings.to_crawl_config(), aliyun_repo),
+            "trickest_cve": TrickestIngestService(trickest_config, trickest_repo),
+            "cvelistv5": CvelistV5IngestService(cv5_config, cvelistv5_repo),
+        }
+
+        app = create_app(repositories, services)
+        uvicorn.run(
+            app,
+            host=settings.rawdb_api_host,
+            port=settings.rawdb_api_port,
+            log_level="info",
+        )
+        return
+
+    # --- Crawl ---------------------------------------------------------------
     if args.command == "crawl" and channel == "trickest_cve":
         repository = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
         trickest_config = settings.to_crawl_config()
@@ -87,7 +120,16 @@ def main() -> None:
         print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
         return
 
-    # --- Aliyun channel (default) ----------------------------------------
+    if args.command == "crawl" and channel == "cvelistv5":
+        repository = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
+        cv5_config = settings.to_crawl_config()
+        cv5_config.data_dir = settings.cvelistv5_data_dir
+        service_cv5 = CvelistV5IngestService(cv5_config, repository)
+        result = service_cv5.sync(full=args.full)
+        print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
+        return
+
+    # --- Aliyun channel (default) --------------------------------------------
     repository = build_raw_repository(settings)
     service = RawIngestService(settings.to_crawl_config(), repository)
 
@@ -117,11 +159,3 @@ def main() -> None:
             )
         )
         return
-
-    app = create_app(repository, service)
-    uvicorn.run(
-        app,
-        host=settings.rawdb_api_host,
-        port=settings.rawdb_api_port,
-        log_level="info",
-    )

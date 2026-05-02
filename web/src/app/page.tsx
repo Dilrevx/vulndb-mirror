@@ -46,6 +46,7 @@ type CheckpointsResp = {
 type TabMode = "search" | "debug";
 type TriMode = "all" | "yes" | "no";
 type PoCRuleMode = "balanced" | "strict" | "loose";
+type ChannelId = string;
 
 type SmartSearchTokens = {
     text: string[];
@@ -208,6 +209,8 @@ function unique(items: string[]): string[] {
 
 export default function Home() {
     const [activeTab, setActiveTab] = useState<TabMode>("search");
+    const [channel, setChannel] = useState<ChannelId>("aliyun");
+    const [channelList, setChannelList] = useState<ChannelId[]>(["aliyun"]);
     const [query, setQuery] = useState<QueryResp | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
@@ -287,7 +290,7 @@ export default function Home() {
 
     const hasUnappliedChanges = JSON.stringify(draft) !== JSON.stringify(applied);
 
-    async function runQuery(targetPage = page, targetPageSize = pageSize, filters = applied): Promise<void> {
+    async function runQuery(targetPage = page, targetPageSize = pageSize, filters = applied, ch = channel): Promise<void> {
         const requestSeq = ++querySeqRef.current;
         queryAbortRef.current?.abort();
         const controller = new AbortController();
@@ -296,9 +299,11 @@ export default function Home() {
         setLoading(true);
         setError("");
         try {
-            const params = new URLSearchParams({ page: String(targetPage), page_size: String(targetPageSize) });
+            const params = new URLSearchParams({ page: String(targetPage), page_size: String(targetPageSize), channel: ch });
             const normalizedSearch = normalizeSearchInput(filters.search);
             if (normalizedSearch) params.set("q", normalizedSearch);
+            if (filters.patchOnly === "yes") params.set("has_patch", "true");
+            else if (filters.patchOnly === "no") params.set("has_patch", "false");
             if (filters.showAdvanced && filters.from) params.set("modified_from", filters.from);
             if (filters.showAdvanced && filters.to) params.set("modified_to", filters.to);
             const data = await apiGet<QueryResp>(`/raw?${params.toString()}`, { signal: controller.signal });
@@ -319,6 +324,7 @@ export default function Home() {
         const params = new URLSearchParams(window.location.search);
         const initPage = Number(params.get("page") || "1");
         const initPageSize = Number(params.get("page_size") || "20");
+        const initChannel = params.get("channel") || "aliyun";
         const tabValue = params.get("tab");
         const initTab: TabMode = tabValue === "debug" || tabValue === "ops" ? "debug" : "search";
         const initFilters: FilterDraft = {
@@ -334,8 +340,13 @@ export default function Home() {
         };
 
         setActiveTab(initTab);
+        setChannel(initChannel);
         setDraft(initFilters);
         setApplied(initFilters);
+
+        apiGet<{ channels: string[] }>("/channels").then((data) => {
+            setChannelList(data.channels);
+        }).catch(() => {});
 
         let mounted = true;
         void (async () => {
@@ -348,9 +359,11 @@ export default function Home() {
             try {
                 const safePage = Math.max(1, initPage || 1);
                 const safeSize = [10, 20, 50, 100].includes(initPageSize) ? initPageSize : 20;
-                const queryParams = new URLSearchParams({ page: String(safePage), page_size: String(safeSize) });
+                const queryParams = new URLSearchParams({ page: String(safePage), page_size: String(safeSize), channel: initChannel });
                 const normalizedSearch = normalizeSearchInput(initFilters.search);
                 if (normalizedSearch) queryParams.set("q", normalizedSearch);
+                if (initFilters.patchOnly === "yes") queryParams.set("has_patch", "true");
+                else if (initFilters.patchOnly === "no") queryParams.set("has_patch", "false");
                 if (initFilters.showAdvanced && initFilters.from) queryParams.set("modified_from", initFilters.from);
                 if (initFilters.showAdvanced && initFilters.to) queryParams.set("modified_to", initFilters.to);
                 const data = await apiGet<QueryResp>(`/raw?${queryParams.toString()}`, { signal: controller.signal });
@@ -376,6 +389,7 @@ export default function Home() {
         const params = new URLSearchParams();
         params.set("page", String(page));
         params.set("page_size", String(pageSize));
+        if (channel !== "aliyun") params.set("channel", channel);
         if (applied.showAdvanced) params.set("advanced", "1");
         if (applied.showAdvanced && applied.from) params.set("modified_from", applied.from);
         if (applied.showAdvanced && applied.to) params.set("modified_to", applied.to);
@@ -387,7 +401,17 @@ export default function Home() {
         if (applied.pocRuleMode !== "balanced") params.set("poc_rule", applied.pocRuleMode);
         if (activeTab !== "search") params.set("tab", activeTab);
         window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
-    }, [page, pageSize, applied, activeTab]);
+    }, [page, pageSize, applied, activeTab, channel]);
+
+    function switchChannel(ch: ChannelId): void {
+        setChannel(ch);
+        if (ch !== "aliyun" && activeTab === "debug") setActiveTab("search");
+        setPage(1);
+        setSelected(null);
+        setGaps(null);
+        setCheckpoints(null);
+        void runQuery(1, pageSize, applied, ch);
+    }
 
     function resetDraftAndApply(): void {
         setPage(1);
@@ -405,7 +429,7 @@ export default function Home() {
     async function openDetail(item: RawItem): Promise<void> {
         setSelected(item);
         try {
-            const data = await apiGet<RawItem>(`/raw/${encodeURIComponent(item.cve_id)}`);
+            const data = await apiGet<RawItem>(`/raw/${encodeURIComponent(item.cve_id)}?channel=${channel}`);
             setDetailJson(JSON.stringify(data, null, 2));
         } catch {
             setDetailJson(JSON.stringify(item, null, 2));
@@ -415,7 +439,7 @@ export default function Home() {
     async function debugLoadByCve(): Promise<void> {
         if (!cveId.trim()) return;
         try {
-            const data = await apiGet<RawItem>(`/raw/${encodeURIComponent(cveId.trim())}`);
+            const data = await apiGet<RawItem>(`/raw/${encodeURIComponent(cveId.trim())}?channel=${channel}`);
             await openDetail(data);
         } catch (e) {
             setRetryResult(String(e));
@@ -424,7 +448,7 @@ export default function Home() {
 
     async function debugLoadGaps(): Promise<void> {
         try {
-            setGaps(await apiGet<GapsResp>(`/pages/gaps?max_page=${maxPage}&include_failed=true`));
+            setGaps(await apiGet<GapsResp>(`/ops/aliyun/gaps?max_page=${maxPage}&include_failed=true`));
         } catch (e) {
             setGaps(null);
             setRetryResult(String(e));
@@ -433,7 +457,7 @@ export default function Home() {
 
     async function debugLoadCheckpoints(): Promise<void> {
         try {
-            setCheckpoints(await apiGet<CheckpointsResp>("/pages/checkpoints"));
+            setCheckpoints(await apiGet<CheckpointsResp>(`/ops/aliyun/checkpoints`));
         } catch (e) {
             setCheckpoints(null);
             setRetryResult(String(e));
@@ -447,7 +471,7 @@ export default function Home() {
             return;
         }
         try {
-            const data = await apiPost("/pages/retry", { pages: parsed });
+            const data = await apiPost("/ops/aliyun/retry", { pages: parsed });
             setRetryResult(JSON.stringify(data, null, 2));
         } catch (e) {
             setRetryResult(String(e));
@@ -459,7 +483,20 @@ export default function Home() {
             <main className="mx-auto max-w-[1700px] px-4 py-5 lg:px-6">
                 <div className="flex items-center gap-2">
                     <TabButton label="漏洞检索" active={activeTab === "search"} onClick={() => setActiveTab("search")} />
-                    <TabButton label="Aliyun 调试" active={activeTab === "debug"} onClick={() => setActiveTab("debug")} />
+                    {channel === "aliyun" ? (
+                        <TabButton label="Aliyun 调试" active={activeTab === "debug"} onClick={() => setActiveTab("debug")} />
+                    ) : null}
+                    <div className="ml-auto">
+                        <select
+                            className="rounded border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700"
+                            value={channel}
+                            onChange={(e) => switchChannel(e.target.value)}
+                        >
+                            {channelList.map((ch) => (
+                                <option key={ch} value={ch}>{ch}</option>
+                            ))}
+                        </select>
+                    </div>
                 </div>
 
                 {activeTab === "search" ? (

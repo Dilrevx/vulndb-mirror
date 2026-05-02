@@ -58,6 +58,7 @@ class RawRepository(ABC):
         q: Optional[str],
         modified_from: Optional[str],
         modified_to: Optional[str],
+        has_patch: Optional[bool] = None,
         page: int,
         page_size: int,
     ) -> RawQueryResult:
@@ -227,6 +228,7 @@ class FileRawRepository(RawRepository):
         q: Optional[str],
         modified_from: Optional[str],
         modified_to: Optional[str],
+        has_patch: Optional[bool] = None,
         page: int,
         page_size: int,
     ) -> RawQueryResult:
@@ -244,6 +246,10 @@ class FileRawRepository(RawRepository):
             if modified_from and md and md < modified_from:
                 continue
             if modified_to and md and md > modified_to:
+                continue
+            if has_patch is True and not item.patch_urls:
+                continue
+            if has_patch is False and item.patch_urls:
                 continue
             if terms:
                 pool = " ".join(
@@ -527,6 +533,7 @@ class SqliteRawRepository(RawRepository):
         q: Optional[str],
         modified_from: Optional[str],
         modified_to: Optional[str],
+        has_patch: Optional[bool] = None,
         page: int,
         page_size: int,
     ) -> RawQueryResult:
@@ -539,6 +546,13 @@ class SqliteRawRepository(RawRepository):
         if modified_to:
             where.append("(modified_date IS NULL OR modified_date <= ?)")
             args.append(modified_to)
+        if has_patch is True:
+            where.append("json_array_length(json_extract(payload, '$.patch_urls')) > 0")
+        elif has_patch is False:
+            where.append(
+                "(json_extract(payload, '$.patch_urls') IS NULL"
+                " OR json_array_length(json_extract(payload, '$.patch_urls')) = 0)"
+            )
         if terms:
             if self._search_index_enabled:
                 where.append(
@@ -746,6 +760,7 @@ class DualWriteRawRepository(RawRepository):
         q: Optional[str],
         modified_from: Optional[str],
         modified_to: Optional[str],
+        has_patch: Optional[bool] = None,
         page: int,
         page_size: int,
     ) -> RawQueryResult:
@@ -754,6 +769,7 @@ class DualWriteRawRepository(RawRepository):
                 q=q,
                 modified_from=modified_from,
                 modified_to=modified_to,
+                has_patch=has_patch,
                 page=page,
                 page_size=page_size,
             )
@@ -762,6 +778,7 @@ class DualWriteRawRepository(RawRepository):
                 q=q,
                 modified_from=modified_from,
                 modified_to=modified_to,
+                has_patch=has_patch,
                 page=page,
                 page_size=page_size,
             )
