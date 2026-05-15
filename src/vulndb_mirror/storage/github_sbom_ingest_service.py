@@ -11,10 +11,12 @@ Two phases:
 from __future__ import annotations
 
 import logging
+import signal
 import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -65,8 +67,8 @@ class _HourlyTokenBucket:
         self._stamps: deque[float] = deque()
         self._lock = threading.Lock()
 
-    def acquire(self, deadline: Optional[float] = None) -> bool:
-        """Block until a slot is free; return False if *deadline* would be missed."""
+    def acquire(self, deadline: Optional[float] = None, stop: Optional[threading.Event] = None) -> bool:
+        """Block until a slot is free; return False if *deadline* would be missed or *stop* is set."""
         while True:
             with self._lock:
                 now = time.time()
@@ -78,12 +80,18 @@ class _HourlyTokenBucket:
                 wait = 3600 - (now - self._stamps[0]) + 0.1
             if deadline is not None and time.time() + wait > deadline:
                 return False
+            if stop is not None and stop.is_set():
+                return False
             logger.info(
                 "SBOM hourly budget reached (%d/h); sleeping %.0fs",
                 self._capacity,
                 wait,
             )
-            time.sleep(min(wait, 30))
+            chunk = min(wait, 30)
+            if stop is not None:
+                stop.wait(chunk)
+            else:
+                time.sleep(chunk)
 
 
 class GithubSbomIngestService:
@@ -167,8 +175,7 @@ class GithubSbomIngestService:
         concurrency: Optional[int] = None,
         priority: Optional[int] = None,
     ) -> WorkerResult:
-        """Drain pending / stale rows until budget exhausted."""
-        ttl_seconds = max(60, int(self.settings.github_sbom_ttl_days) * 86400)
+        """Drain pending rows until budget exhausted."""
         thread_count = max(1, int(concurrency or self.settings.github_sbom_concurrency))
         bucket = _HourlyTokenBucket(self.settings.github_sbom_hourly_budget)
 
@@ -203,7 +210,7 @@ class GithubSbomIngestService:
                     reserved.append(item)
 
                 futures = {
-                    pool.submit(self._process_one, item, ttl_seconds): item
+                    pool.submit(self._process_one, item): item
                     for item in reserved
                 }
                 for fut in as_completed(futures):
@@ -256,12 +263,120 @@ class GithubSbomIngestService:
         return result
 
     # ------------------------------------------------------------------
+    # Long-running service
+    # ------------------------------------------------------------------
+
+    def run_service(
+        self,
+        *,
+        raw_repos: dict[str, RawRepository],
+        priority: Optional[int] = None,
+        discover_interval_seconds: int = 3600,
+    ) -> None:
+        """Blocking service loop. Runs until SIGINT/SIGTERM.
+
+        Each cycle:
+        1. Discover repos from the last 30 days across all *raw_repos* channels.
+        2. Drain the queue (respecting hourly budget; sleeps when rate-limited).
+        3. When queue empties, do a full discover (no time filter) to catch
+           older CVEs, then drain again.
+        4. Sleep until the next discover interval, then repeat.
+        """
+        stop = threading.Event()
+
+        def _on_signal(sig: int, _frame: object) -> None:
+            logger.info("SBOM service: signal %d received, stopping after current batch", sig)
+            stop.set()
+
+        signal.signal(signal.SIGINT, _on_signal)
+        signal.signal(signal.SIGTERM, _on_signal)
+
+        thread_count = max(1, int(self.settings.github_sbom_concurrency))
+
+        last_discover_at: float = 0.0
+        full_discover_done = False
+        total_processed = 0
+
+        logger.info(
+            "SBOM service started: channels=%s priority=%s interval=%ds",
+            list(raw_repos),
+            priority,
+            discover_interval_seconds,
+        )
+
+        with ThreadPoolExecutor(max_workers=thread_count) as pool:
+            while not stop.is_set():
+                now = time.time()
+
+                # Periodic discover: recent 30 days
+                if now - last_discover_at >= discover_interval_seconds:
+                    since_30d = (
+                        datetime.utcnow() - timedelta(days=30)
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    for ch, repo in raw_repos.items():
+                        self.raw_repo = repo
+                        self.discover_from_recent(channel=ch, since_iso=since_30d)
+                    last_discover_at = time.time()
+                    full_discover_done = False
+
+                # Pull next batch
+                batch = self.sbom_repo.next_batch(
+                    max(thread_count * 2, 8), priority=priority
+                )
+
+                if not batch:
+                    if not full_discover_done:
+                        logger.info("SBOM service: recent queue empty, running full discover...")
+                        for ch, repo in raw_repos.items():
+                            self.raw_repo = repo
+                            self.discover_from_recent(channel=ch, since_iso=None)
+                        full_discover_done = True
+                        continue
+                    wait = max(10.0, discover_interval_seconds - (time.time() - last_discover_at))
+                    logger.info(
+                        "SBOM service: queue empty, sleeping %.0fs until next discover", wait
+                    )
+                    stop.wait(min(wait, 60))
+                    continue
+
+                # Acquire rate-limit tokens for each item in the batch
+                reserved = []
+                for item in batch:
+                    if stop.is_set():
+                        break
+                    if not bucket.acquire(stop=stop):
+                        break
+                    reserved.append(item)
+
+                if not reserved:
+                    continue
+
+                futures = {
+                    pool.submit(self._process_one, item): item
+                    for item in reserved
+                }
+                for fut in as_completed(futures):
+                    item = futures[fut]
+                    try:
+                        outcome = fut.result()
+                        _accumulate_log(item, outcome)
+                    except Exception as exc:
+                        logger.warning("SBOM %s/%s error: %s", item.owner, item.repo, exc)
+                        self.sbom_repo.mark_status(
+                            item.owner, item.repo,
+                            status="error", http_status=None, error=str(exc),
+                        )
+                    total_processed += 1
+                    if total_processed % 100 == 0:
+                        logger.info("SBOM service: total_processed=%d", total_processed)
+
+        logger.info("SBOM service stopped. total_processed=%d", total_processed)
+
+    # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _process_one(
-        self, item: SbomQueueItem, ttl_seconds: int
-    ) -> SbomResult:
+    def _process_one(self, item: SbomQueueItem) -> SbomResult:
         result = self.crawler.fetch_sbom(
             item.owner, item.repo, etag=item.sbom_etag
         )
@@ -274,12 +389,9 @@ class GithubSbomIngestService:
                 packages=packages,
                 etag=result.etag,
                 http_status=result.http_status or 200,
-                ttl_seconds=ttl_seconds,
             )
         elif result.status == "not_modified":
-            self.sbom_repo.touch_not_modified(
-                item.owner, item.repo, ttl_seconds=ttl_seconds
-            )
+            self.sbom_repo.touch_not_modified(item.owner, item.repo)
         else:
             self.sbom_repo.mark_status(
                 item.owner,
@@ -302,6 +414,11 @@ def _accumulate(acc: WorkerResult, outcome: SbomResult) -> None:
         acc.skipped_403 += 1
     else:
         acc.errors += 1
+
+
+def _accumulate_log(item: SbomQueueItem, outcome: SbomResult) -> None:
+    if outcome.status not in ("fetched", "not_modified"):
+        logger.debug("SBOM %s/%s → %s", item.owner, item.repo, outcome.status)
 
 
 def _iter_raw_payloads(

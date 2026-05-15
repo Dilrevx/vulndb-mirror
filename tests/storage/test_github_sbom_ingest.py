@@ -132,6 +132,28 @@ class EnqueueTests(TempDbMixin, unittest.TestCase):
         row = self.sbom.query_by_repo("foo", "bar")
         self.assertEqual(row["priority"], 0)
 
+    def test_enqueue_resets_fetched_to_pending(self):
+        # Simulate a repo that was already fetched
+        self.sbom.enqueue_many([RepoRef("foo", "bar", 1)], source_cve="CVE-A")
+        # Mark it as fetched (as the worker would)
+        self.sbom.upsert_sbom(
+            "foo", "bar",
+            payload={"sbom": {}}, packages=[], etag=None, http_status=200,
+        )
+        self.assertEqual(self.sbom.query_by_repo("foo", "bar")["status"], "fetched")
+        # A new CVE references the same repo — should reset to pending
+        self.sbom.enqueue_many([RepoRef("foo", "bar", 1)], source_cve="CVE-B")
+        row = self.sbom.query_by_repo("foo", "bar")
+        self.assertEqual(row["status"], "pending")
+        self.assertCountEqual(row["source_cves"], ["CVE-A", "CVE-B"])
+
+    def test_enqueue_does_not_reset_skip_404(self):
+        # skip_404 is terminal — a new CVE reference should not re-queue it
+        self.sbom.enqueue_many([RepoRef("gone", "repo", 1)], source_cve="CVE-A")
+        self.sbom.mark_status("gone", "repo", status="skip_404", http_status=404, error=None)
+        self.sbom.enqueue_many([RepoRef("gone", "repo", 1)], source_cve="CVE-B")
+        self.assertEqual(self.sbom.query_by_repo("gone", "repo")["status"], "skip_404")
+
     def test_next_batch_orders_by_priority(self):
         self.sbom.enqueue_many(
             [
@@ -200,7 +222,6 @@ class WorkerTests(TempDbMixin, unittest.TestCase):
         self.settings = CrawlerSettings(
             github_sbom_concurrency=2,
             github_sbom_hourly_budget=1000,
-            github_sbom_ttl_days=1,
         )
 
     def _seed(self, refs: list[RepoRef]) -> None:
@@ -290,7 +311,7 @@ class WorkerTests(TempDbMixin, unittest.TestCase):
 
         self.assertEqual(self.sbom.query_by_repo("a", "missing")["status"], "skip_404")
         self.assertEqual(self.sbom.query_by_repo("b", "private")["status"], "skip_403")
-        # 304 keeps status='fetched' but refreshes expires_at
+        # 304 → status stays 'fetched'
         self.assertEqual(self.sbom.query_by_repo("c", "stable")["status"], "fetched")
 
     def test_worker_priority_filter(self):

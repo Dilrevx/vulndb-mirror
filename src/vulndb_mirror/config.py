@@ -196,10 +196,6 @@ class CrawlerSettings(BaseSettings):
             "channel raw.db so cross-channel discoveries share one cache."
         ),
     )
-    github_sbom_ttl_days: int = Field(
-        default=7,
-        description="Days a cached SBOM stays fresh before refetch is eligible",
-    )
     github_sbom_concurrency: int = Field(
         default=4,
         description="Worker thread count for parallel SBOM fetches",

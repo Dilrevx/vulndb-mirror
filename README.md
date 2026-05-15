@@ -79,28 +79,42 @@ uv run vulndb-mirror crawl --channel cvelistv5 --full
 
 需要设置 `GITHUB_TOKEN`（Personal Access Token，5000 req/h）。
 
+**启动长驻服务**（推荐在 tmux 中运行）：
+
 ```bash
-# 1. 从 CVE 数据中提取 GitHub 仓库并入队
-uv run vulndb-mirror github-deps discover --channel cvelistv5
+# 扫描 cvelistv5 channel，每小时重新发现近 30 天的 CVE
+uv run vulndb-mirror github-deps run
 
-# 只扫描最近 7 天更新的 CVE
-uv run vulndb-mirror github-deps discover --channel cvelistv5 --since-days 7
-
-# 2. 拉取队列中的 SBOM 数据（受 hourly budget 控制）
-uv run vulndb-mirror github-deps sync --max-repos 200 --max-seconds 300
+# 同时扫描多个 channel
+uv run vulndb-mirror github-deps run --channel cvelistv5 trickest_cve
 
 # 只处理高优先级（patch_url 中的仓库）
-uv run vulndb-mirror github-deps sync --max-repos 100 --priority 0
+uv run vulndb-mirror github-deps run --patch-only
 
-# 3. 查看缓存统计
-uv run vulndb-mirror github-deps stats
+# 自定义发现间隔（秒）
+uv run vulndb-mirror github-deps run --discover-interval 1800
 ```
+
+服务行为：
+1. 启动时立即扫描近 30 天的 CVE，提取 GitHub 仓库入队
+2. 持续拉取队列，受 hourly budget 控制；限速时自动等待，不退出
+3. 队列清空后，扫描全量 CVE（无时间过滤）补充历史数据
+4. 每隔 `--discover-interval` 秒重复步骤 1，循环运行
+5. `Ctrl-C` / `SIGTERM` 优雅退出（当前批次处理完后停止）
+
+**时效性说明**：SBOM 缓存没有固定过期时间。一个仓库被抓取后会保持 `fetched` 状态，直到有新的 CVE 再次引用它——此时 `enqueue_many` 会把状态重置为 `pending`，触发重新拉取。这样既避免了无意义的重复请求，又保证了"有新漏洞关联时依赖数据是最新的"。`skip_404` / `skip_403` 是终态，不会被新 CVE 重置（仓库不存在或无 SBOM 权限，重试无意义）。
 
 优先级说明：
 - `priority=0`：出现在 `patch_urls` 中的仓库（高价值，优先处理）
 - `priority=1`：仅出现在 `references` 中的仓库
 
-`crawl --channel cvelistv5/trickest_cve` 同步完成后会自动触发 `discover`。若需同步后也自动跑 worker，设置 `GITHUB_SBOM_AUTO_WORKER=true`。
+`crawl --channel cvelistv5/trickest_cve` 同步完成后会自动触发一次 discover，与服务并行运行时是幂等的。
+
+**查看缓存统计**：
+
+```bash
+uv run vulndb-mirror github-deps stats
+```
 
 ## 环境变量
 
@@ -125,12 +139,8 @@ GIT_PROXY=socks5://127.0.0.1:1080  # 可选，git 操作代理
 CVELISTV5_DATA_DIR=./output/cvelistv5
 
 # GitHub SBOM 缓存
-GITHUB_SBOM_TTL_DAYS=7                    # 缓存有效期（天）
 GITHUB_SBOM_CONCURRENCY=4                 # 并发线程数
 GITHUB_SBOM_HOURLY_BUDGET=4500            # 每小时最大请求数（留 500 给其他调用）
-GITHUB_SBOM_AUTO_WORKER=false             # crawl 后自动跑 worker
-GITHUB_SBOM_AUTO_WORKER_MAX_REPOS=100     # auto worker 单次最多处理仓库数
-GITHUB_SBOM_AUTO_WORKER_MAX_SECONDS=60    # auto worker 最长运行秒数
 GITHUB_SBOM_SQLITE_PATH=                  # 留空则使用 cvelistv5 的 raw.db
 
 # API 服务

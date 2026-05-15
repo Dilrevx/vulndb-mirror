@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -76,44 +76,33 @@ def _build_parser() -> argparse.ArgumentParser:
 
     deps = sub.add_parser(
         "github-deps",
-        help="GitHub Dependency Graph (SBOM) cache: discover, sync, stats",
+        help="GitHub Dependency Graph (SBOM) cache",
     )
     deps_sub = deps.add_subparsers(dest="deps_command", required=True)
 
-    deps_discover = deps_sub.add_parser(
-        "discover",
-        help="extract github repos from recent CVEs and enqueue them",
+    deps_run = deps_sub.add_parser(
+        "run",
+        help="start long-running SBOM service (suitable for tmux)",
     )
-    deps_discover.add_argument(
+    deps_run.add_argument(
         "--channel",
-        default="cvelistv5",
+        nargs="+",
+        default=["cvelistv5"],
         choices=["cvelistv5", "trickest_cve", "aliyun"],
-        help="raw repository to scan (default: cvelistv5)",
+        help="raw repository channels to scan for repos (default: cvelistv5)",
     )
-    deps_discover.add_argument(
-        "--since-days",
+    deps_run.add_argument(
+        "--patch-only",
+        action="store_true",
+        default=False,
+        help="only process priority-0 repos (those from patch_urls)",
+    )
+    deps_run.add_argument(
+        "--discover-interval",
         type=int,
-        default=None,
-        help="only scan CVEs updated within the last N days (default: all)",
-    )
-    deps_discover.add_argument("--limit", type=int, default=None)
-
-    deps_sync = deps_sub.add_parser(
-        "sync", help="drain the SBOM queue (network)"
-    )
-    deps_sync.add_argument(
-        "--channel",
-        default="cvelistv5",
-        choices=["cvelistv5", "trickest_cve", "aliyun"],
-        help="raw repository channel (used to locate the SBOM sqlite)",
-    )
-    deps_sync.add_argument("--max-repos", type=int, default=200)
-    deps_sync.add_argument("--max-seconds", type=int, default=300)
-    deps_sync.add_argument(
-        "--priority",
-        default="all",
-        choices=["0", "1", "all"],
-        help="0 = patch repos only, 1 = ref-only, all = both (default: all)",
+        default=3600,
+        metavar="SECONDS",
+        help="seconds between periodic re-discovers of recent CVEs (default: 3600)",
     )
 
     deps_stats = deps_sub.add_parser("stats", help="show SBOM cache stats")
@@ -238,43 +227,40 @@ def main() -> None:
         )
         return
 
-    # --- GitHub SBOM ops -----------------------------------------------------
+    # --- GitHub SBOM service -------------------------------------------------
     if args.command == "github-deps":
-        deps_channel = args.channel
-        if deps_channel == "trickest_cve":
-            raw_repo = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
-        elif deps_channel == "cvelistv5":
-            raw_repo = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
-        else:
-            raw_repo = build_raw_repository(settings)
-
-        sbom_service = _build_sbom_service(settings, raw_repo, channel=deps_channel)
-
-        if args.deps_command == "discover":
-            since_iso: Optional[str] = None
-            if args.since_days is not None:
-                since_iso = (
-                    datetime.utcnow() - timedelta(days=int(args.since_days))
-                ).strftime("%Y-%m-%dT%H:%M:%SZ")
-            result = sbom_service.discover_from_recent(
-                channel=deps_channel,
-                since_iso=since_iso,
-                limit=args.limit,
+        if args.deps_command == "run":
+            channels: list[str] = args.channel
+            raw_repos: dict[str, RawRepository] = {}
+            for ch in channels:
+                if ch == "trickest_cve":
+                    raw_repos[ch] = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
+                elif ch == "cvelistv5":
+                    raw_repos[ch] = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
+                else:
+                    raw_repos[ch] = build_raw_repository(settings)
+            # SBOM cache always lives in the cvelistv5 db (or GITHUB_SBOM_SQLITE_PATH)
+            primary_channel = "cvelistv5" if "cvelistv5" in channels else channels[0]
+            sbom_service = _build_sbom_service(
+                settings, raw_repos[primary_channel], channel=primary_channel
             )
-            print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
-            return
-
-        if args.deps_command == "sync":
-            priority = None if args.priority == "all" else int(args.priority)
-            result = sbom_service.run_worker(
-                max_repos=args.max_repos,
-                max_seconds=args.max_seconds,
+            priority = 0 if args.patch_only else None
+            sbom_service.run_service(
+                raw_repos=raw_repos,
                 priority=priority,
+                discover_interval_seconds=args.discover_interval,
             )
-            print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
             return
 
         if args.deps_command == "stats":
+            stats_channel = args.channel
+            if stats_channel == "trickest_cve":
+                stats_raw = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
+            elif stats_channel == "cvelistv5":
+                stats_raw = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
+            else:
+                stats_raw = build_raw_repository(settings)
+            sbom_service = _build_sbom_service(settings, stats_raw, channel=stats_channel)
             print(json.dumps(sbom_service.sbom_repo.stats(), ensure_ascii=False, indent=2))
             return
 

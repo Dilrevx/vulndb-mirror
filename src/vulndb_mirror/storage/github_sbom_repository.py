@@ -11,7 +11,7 @@ import json
 import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -29,14 +29,6 @@ class SbomQueueItem:
     sbom_etag: Optional[str]
 
 
-def _now_plus(days: int) -> str:
-    dt = datetime.utcnow() + timedelta(days=days)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _seconds_to_iso(seconds: int) -> str:
-    dt = datetime.utcnow() + timedelta(seconds=seconds)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class GitHubSbomRepository:
@@ -90,7 +82,9 @@ class GitHubSbomRepository:
                     touched += 1
                     continue
 
-                # Merge: priority lowers (toward 0); source_cves dedupes
+                # Merge: priority lowers (toward 0); source_cves dedupes.
+                # If the repo was already fetched, a new CVE referencing it
+                # means its dependencies may have changed — reset to pending.
                 try:
                     existing = json.loads(row["source_cves"] or "[]")
                     if not isinstance(existing, list):
@@ -100,19 +94,19 @@ class GitHubSbomRepository:
                 if source_cve and source_cve not in existing:
                     existing.append(source_cve)
                 new_priority = min(int(row["priority"]), int(ref.priority))
+                current_status = row["status"]
+                new_status = (
+                    "pending"
+                    if current_status in ("fetched", "not_modified")
+                    else current_status
+                )
                 conn.execute(
                     """
                     UPDATE github_sbom_cache
-                    SET priority=?, source_cves=?, updated_at=?
+                    SET priority=?, source_cves=?, status=?, updated_at=?
                     WHERE owner=? AND repo=?
                     """,
-                    (
-                        new_priority,
-                        json.dumps(existing),
-                        ts,
-                        ref.owner,
-                        ref.repo,
-                    ),
+                    (new_priority, json.dumps(existing), new_status, ts, ref.owner, ref.repo),
                 )
                 touched += 1
             conn.commit()
@@ -127,22 +121,10 @@ class GitHubSbomRepository:
         limit: int,
         *,
         priority: Optional[int] = None,
-        include_stale: bool = True,
     ) -> list[SbomQueueItem]:
-        """Pick up to *limit* rows in (priority ASC, enqueued_at ASC) order.
-
-        Includes pending rows; if *include_stale* is True, also includes
-        previously fetched rows whose ``expires_at`` has passed.
-        """
+        """Pick up to *limit* pending rows in (priority ASC, enqueued_at ASC) order."""
         clauses = ["status = 'pending'"]
         args: list[object] = []
-        if include_stale:
-            clauses = [
-                "(status = 'pending' OR ("
-                "status IN ('fetched', 'not_modified') "
-                "AND expires_at IS NOT NULL AND expires_at < ?))"
-            ]
-            args.append(now_iso())
         if priority is not None:
             clauses.append("priority = ?")
             args.append(int(priority))
@@ -180,11 +162,9 @@ class GitHubSbomRepository:
         packages: list[ParsedPackage],
         etag: Optional[str],
         http_status: int,
-        ttl_seconds: int,
     ) -> None:
         """Persist a freshly fetched SBOM and its parsed package rows."""
         ts = now_iso()
-        expires = _seconds_to_iso(ttl_seconds)
         payload_json = json.dumps(payload, ensure_ascii=False)
         with self._connect() as conn:
             conn.execute(
@@ -197,21 +177,11 @@ class GitHubSbomRepository:
                     sbom_etag=?,
                     package_count=?,
                     fetched_at=?,
-                    expires_at=?,
+                    expires_at=NULL,
                     updated_at=?
                 WHERE owner=? AND repo=?
                 """,
-                (
-                    http_status,
-                    payload_json,
-                    etag,
-                    len(packages),
-                    ts,
-                    expires,
-                    ts,
-                    owner,
-                    repo,
-                ),
+                (http_status, payload_json, etag, len(packages), ts, ts, owner, repo),
             )
             conn.execute(
                 "DELETE FROM github_sbom_packages WHERE owner=? AND repo=?",
@@ -241,12 +211,9 @@ class GitHubSbomRepository:
                 )
             conn.commit()
 
-    def touch_not_modified(
-        self, owner: str, repo: str, *, ttl_seconds: int
-    ) -> None:
-        """304 path: keep payload/packages, just refresh ``expires_at``."""
+    def touch_not_modified(self, owner: str, repo: str) -> None:
+        """304 path: keep payload/packages, just record the fetch time."""
         ts = now_iso()
-        expires = _seconds_to_iso(ttl_seconds)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -255,11 +222,11 @@ class GitHubSbomRepository:
                     http_status=304,
                     error_message=NULL,
                     fetched_at=?,
-                    expires_at=?,
+                    expires_at=NULL,
                     updated_at=?
                 WHERE owner=? AND repo=?
                 """,
-                (ts, expires, ts, owner, repo),
+                (ts, ts, owner, repo),
             )
             conn.commit()
 
@@ -287,19 +254,6 @@ class GitHubSbomRepository:
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------
-
-    def is_fresh(self, owner: str, repo: str, ttl_seconds: int) -> bool:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT status, expires_at FROM github_sbom_cache "
-                "WHERE owner=? AND repo=?",
-                (owner, repo),
-            ).fetchone()
-        if row is None or row["status"] != "fetched":
-            return False
-        if not row["expires_at"]:
-            return False
-        return row["expires_at"] > now_iso()
 
     def query_by_repo(self, owner: str, repo: str) -> Optional[dict]:
         with self._connect() as conn:
