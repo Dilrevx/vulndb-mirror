@@ -43,7 +43,7 @@ type CheckpointsResp = {
     meta: Record<string, unknown>;
 };
 
-type TabMode = "search" | "debug";
+type TabMode = "search" | "debug" | "github";
 type TriMode = "all" | "yes" | "no";
 type PoCRuleMode = "balanced" | "strict" | "loose";
 type ChannelId = string;
@@ -69,7 +69,54 @@ type FilterDraft = {
     to: string;
 };
 
+type LangEntry = { language: string; bytes: number; percent: number };
+type PkgEntry = {
+    manifest_path: string | null;
+    ecosystem: string | null;
+    package_name: string;
+    version_info: string | null;
+    relationship: string | null;
+};
+type GithubLangsData = { status: string; languages: LangEntry[] };
+type GithubDepsData = { status: string; package_count: number; packages: PkgEntry[] };
+type RepoGithubData = { langs: GithubLangsData | null; deps: GithubDepsData | null; loading: boolean };
+
+type PkgByPackageItem = {
+    owner: string; repo: string; manifest_path: string | null;
+    ecosystem: string | null; package_name: string; version_info: string | null;
+    relationship: string | null; priority: number; source_cves: string[]; fetched_at: string | null;
+};
+type LangByLanguageItem = {
+    owner: string; repo: string; language: string; bytes: number;
+    priority: number; source_cves: string[]; fetched_at: string | null;
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") || "http://127.0.0.1:8787";
+
+const LANG_COLORS: Record<string, string> = {
+    JavaScript: "#f1e05a", TypeScript: "#3178c6", Python: "#3572A5",
+    Java: "#b07219", Go: "#00ADD8", Rust: "#dea584",
+    C: "#555555", "C++": "#f34b7d", "C#": "#178600",
+    Ruby: "#701516", PHP: "#4F5D95", Swift: "#F05138",
+    Kotlin: "#A97BFF", Scala: "#c22d40", Shell: "#89e051",
+    HTML: "#e34c26", CSS: "#563d7c", Vue: "#41b883",
+    Dockerfile: "#384d54", Makefile: "#427819",
+};
+
+const _GH_REPO_RE = /^https?:\/\/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?(?:[/?#].*)?$/i;
+function parseGithubRepos(urls: string[]): Array<{ owner: string; repo: string }> {
+    const seen = new Set<string>();
+    const result: Array<{ owner: string; repo: string }> = [];
+    for (const url of urls) {
+        const m = _GH_REPO_RE.exec(url.trim());
+        if (!m) continue;
+        const owner = m[1].toLowerCase();
+        const repo = m[2].toLowerCase().replace(/\.git$/, "");
+        const key = `${owner}/${repo}`;
+        if (!seen.has(key)) { seen.add(key); result.push({ owner, repo }); }
+    }
+    return result;
+}
 
 const DEFAULT_FILTERS: FilterDraft = {
     search: "",
@@ -223,6 +270,7 @@ export default function Home() {
 
     const [selected, setSelected] = useState<RawItem | null>(null);
     const [detailJson, setDetailJson] = useState("{}");
+    const [repoData, setRepoData] = useState<Record<string, RepoGithubData>>({});
 
     const [cveId, setCveId] = useState("");
     const [maxPage, setMaxPage] = useState(500);
@@ -232,6 +280,20 @@ export default function Home() {
     const [retryResult, setRetryResult] = useState("{}");
     const querySeqRef = useRef(0);
     const queryAbortRef = useRef<AbortController | null>(null);
+
+    // GitHub cache tab state
+    const [depsStats, setDepsStats] = useState<Record<string, number> | null>(null);
+    const [langsStats, setLangsStats] = useState<Record<string, number> | null>(null);
+    const [statsLoading, setStatsLoading] = useState(false);
+    const [pkgName, setPkgName] = useState("");
+    const [pkgEco, setPkgEco] = useState("");
+    const [pkgResults, setPkgResults] = useState<PkgByPackageItem[] | null>(null);
+    const [pkgLoading, setPkgLoading] = useState(false);
+    const [pkgError, setPkgError] = useState("");
+    const [langName, setLangName] = useState("");
+    const [langResults, setLangResults] = useState<LangByLanguageItem[] | null>(null);
+    const [langLoading, setLangLoading] = useState(false);
+    const [langError, setLangError] = useState("");
 
     const searchTokens = useMemo(() => parseSmartSearch(applied.search), [applied.search]);
 
@@ -428,9 +490,26 @@ export default function Home() {
 
     async function openDetail(item: RawItem): Promise<void> {
         setSelected(item);
+        setRepoData({});
         try {
             const data = await apiGet<RawItem>(`/raw/${encodeURIComponent(item.cve_id)}?channel=${channel}`);
             setDetailJson(JSON.stringify(data, null, 2));
+            const allUrls = [...(data.patch_urls || []), ...(data.references || [])];
+            const repos = parseGithubRepos(allUrls);
+            if (repos.length) {
+                const initial: Record<string, RepoGithubData> = {};
+                for (const { owner, repo } of repos) initial[`${owner}/${repo}`] = { langs: null, deps: null, loading: true };
+                setRepoData(initial);
+                for (const { owner, repo } of repos) {
+                    const key = `${owner}/${repo}`;
+                    void Promise.all([
+                        apiGet<GithubLangsData>(`/github-languages/${owner}/${repo}`).catch(() => null),
+                        apiGet<GithubDepsData>(`/github-deps/${owner}/${repo}`).catch(() => null),
+                    ]).then(([langs, deps]) => {
+                        setRepoData((prev) => ({ ...prev, [key]: { langs, deps, loading: false } }));
+                    });
+                }
+            }
         } catch {
             setDetailJson(JSON.stringify(item, null, 2));
         }
@@ -478,6 +557,52 @@ export default function Home() {
         }
     }
 
+    async function loadGithubStats(): Promise<void> {
+        setStatsLoading(true);
+        try {
+            const [d, l] = await Promise.all([
+                apiGet<Record<string, number>>("/github-deps/stats").catch(() => null),
+                apiGet<Record<string, number>>("/github-languages/stats").catch(() => null),
+            ]);
+            setDepsStats(d);
+            setLangsStats(l);
+        } finally {
+            setStatsLoading(false);
+        }
+    }
+
+    async function searchByPackage(): Promise<void> {
+        if (!pkgName.trim()) return;
+        setPkgLoading(true);
+        setPkgError("");
+        setPkgResults(null);
+        try {
+            const params = new URLSearchParams({ name: pkgName.trim() });
+            if (pkgEco.trim()) params.set("ecosystem", pkgEco.trim());
+            const data = await apiGet<{ items: PkgByPackageItem[] }>(`/github-deps/by-package?${params}`);
+            setPkgResults(data.items);
+        } catch (e) {
+            setPkgError(String(e));
+        } finally {
+            setPkgLoading(false);
+        }
+    }
+
+    async function searchByLanguage(): Promise<void> {
+        if (!langName.trim()) return;
+        setLangLoading(true);
+        setLangError("");
+        setLangResults(null);
+        try {
+            const data = await apiGet<{ items: LangByLanguageItem[] }>(`/github-languages/by-language?name=${encodeURIComponent(langName.trim())}`);
+            setLangResults(data.items);
+        } catch (e) {
+            setLangError(String(e));
+        } finally {
+            setLangLoading(false);
+        }
+    }
+
     return (
         <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.16),_transparent_34%),linear-gradient(180deg,#f8fbff_0%,#eef2ff_100%)] text-slate-900">
             <main className="mx-auto max-w-[1700px] px-4 py-5 lg:px-6">
@@ -486,6 +611,7 @@ export default function Home() {
                     {channel === "aliyun" ? (
                         <TabButton label="Aliyun 调试" active={activeTab === "debug"} onClick={() => setActiveTab("debug")} />
                     ) : null}
+                    <TabButton label="GitHub 缓存" active={activeTab === "github"} onClick={() => { setActiveTab("github"); void loadGithubStats(); }} />
                     <div className="ml-auto">
                         <select
                             className="rounded border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700"
@@ -642,6 +768,144 @@ export default function Home() {
                             </div>
                         </section>
                     </div>
+                ) : activeTab === "github" ? (
+                    <section className="mt-4 space-y-4">
+                        <div className="flex items-center gap-3">
+                            <h2 className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-600">GitHub 缓存</h2>
+                            <button
+                                className="rounded border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                                disabled={statsLoading}
+                                onClick={() => void loadGithubStats()}
+                            >
+                                {statsLoading ? "加载中…" : "刷新统计"}
+                            </button>
+                        </div>
+
+                        <div className="grid gap-4 xl:grid-cols-2">
+                            <GithubStatsCard title="依赖图 (SBOM)" stats={depsStats} totalKey="total_packages" totalLabel="包总数" />
+                            <GithubStatsCard title="语言组成" stats={langsStats} totalKey="total_language_rows" totalLabel="语言行数" />
+                        </div>
+
+                        <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+                            <h3 className="text-sm font-semibold">按包名反查仓库</h3>
+                            <div className="flex flex-wrap gap-2">
+                                <input
+                                    className="min-w-0 flex-1 rounded border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
+                                    placeholder="包名，如 lodash"
+                                    value={pkgName}
+                                    onChange={(e) => setPkgName(e.target.value)}
+                                    onKeyDown={(e) => { if (e.key === "Enter") void searchByPackage(); }}
+                                />
+                                <input
+                                    className="w-36 rounded border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
+                                    placeholder="ecosystem（可选）"
+                                    value={pkgEco}
+                                    onChange={(e) => setPkgEco(e.target.value)}
+                                    onKeyDown={(e) => { if (e.key === "Enter") void searchByPackage(); }}
+                                />
+                                <button
+                                    className="rounded bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                                    disabled={pkgLoading}
+                                    onClick={() => void searchByPackage()}
+                                >
+                                    {pkgLoading ? "查询中…" : "查询"}
+                                </button>
+                            </div>
+                            {pkgError && <p className="text-xs text-rose-600">{pkgError}</p>}
+                            {pkgResults !== null && (
+                                pkgResults.length === 0
+                                    ? <p className="text-sm text-slate-500">无结果</p>
+                                    : <div className="overflow-x-auto">
+                                        <table className="w-full text-xs">
+                                            <thead>
+                                                <tr className="border-b border-slate-200 text-left text-slate-500">
+                                                    <th className="pb-2 pr-4 font-medium">仓库</th>
+                                                    <th className="pb-2 pr-4 font-medium">ecosystem</th>
+                                                    <th className="pb-2 pr-4 font-medium">包名</th>
+                                                    <th className="pb-2 pr-4 font-medium">版本</th>
+                                                    <th className="pb-2 pr-4 font-medium">关系</th>
+                                                    <th className="pb-2 font-medium">CVE 数</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-100">
+                                                {pkgResults.map((item, i) => (
+                                                    <tr key={i} className="text-slate-700">
+                                                        <td className="py-1.5 pr-4 font-mono">
+                                                            <a href={`https://github.com/${item.owner}/${item.repo}`} target="_blank" rel="noreferrer" className="text-blue-700 hover:underline">
+                                                                {item.owner}/{item.repo}
+                                                            </a>
+                                                        </td>
+                                                        <td className="py-1.5 pr-4 text-slate-500">{item.ecosystem ?? "-"}</td>
+                                                        <td className="py-1.5 pr-4">{item.package_name}</td>
+                                                        <td className="py-1.5 pr-4 text-slate-500">{item.version_info ?? "-"}</td>
+                                                        <td className="py-1.5 pr-4 text-slate-500">{item.relationship ?? "-"}</td>
+                                                        <td className="py-1.5">{item.source_cves.length}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                            )}
+                        </div>
+
+                        <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+                            <h3 className="text-sm font-semibold">按语言反查仓库</h3>
+                            <div className="flex flex-wrap gap-2">
+                                <input
+                                    className="min-w-0 flex-1 rounded border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
+                                    placeholder="语言名，如 Python"
+                                    value={langName}
+                                    onChange={(e) => setLangName(e.target.value)}
+                                    onKeyDown={(e) => { if (e.key === "Enter") void searchByLanguage(); }}
+                                />
+                                <button
+                                    className="rounded bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                                    disabled={langLoading}
+                                    onClick={() => void searchByLanguage()}
+                                >
+                                    {langLoading ? "查询中…" : "查询"}
+                                </button>
+                            </div>
+                            {langError && <p className="text-xs text-rose-600">{langError}</p>}
+                            {langResults !== null && (
+                                langResults.length === 0
+                                    ? <p className="text-sm text-slate-500">无结果</p>
+                                    : <div className="overflow-x-auto">
+                                        <table className="w-full text-xs">
+                                            <thead>
+                                                <tr className="border-b border-slate-200 text-left text-slate-500">
+                                                    <th className="pb-2 pr-4 font-medium">仓库</th>
+                                                    <th className="pb-2 pr-4 font-medium">语言</th>
+                                                    <th className="pb-2 pr-4 font-medium">字节数</th>
+                                                    <th className="pb-2 pr-4 font-medium">优先级</th>
+                                                    <th className="pb-2 font-medium">CVE 数</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-100">
+                                                {langResults.map((item, i) => (
+                                                    <tr key={i} className="text-slate-700">
+                                                        <td className="py-1.5 pr-4 font-mono">
+                                                            <a href={`https://github.com/${item.owner}/${item.repo}`} target="_blank" rel="noreferrer" className="text-blue-700 hover:underline">
+                                                                {item.owner}/{item.repo}
+                                                            </a>
+                                                        </td>
+                                                        <td className="py-1.5 pr-4">
+                                                            <span className="flex items-center gap-1">
+                                                                <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: LANG_COLORS[item.language] ?? "#8b949e" }} />
+                                                                {item.language}
+                                                            </span>
+                                                        </td>
+                                                        <td className="py-1.5 pr-4 text-slate-500">{(item.bytes / 1024).toFixed(1)} KB</td>
+                                                        <td className="py-1.5 pr-4 text-slate-500">{item.priority}</td>
+                                                        <td className="py-1.5">{item.source_cves.length}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                            )}
+                        </div>
+                    </section>
                 ) : (
                     <section className="mt-4 space-y-4">
                         <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
@@ -693,7 +957,7 @@ export default function Home() {
                                 <div className="text-xs uppercase tracking-widest text-slate-400">Vulnerability Detail</div>
                                 <h3 className="text-xl font-semibold text-slate-950">{selected.cve_id}</h3>
                             </div>
-                            <button className="rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-sm" onClick={() => setSelected(null)}>关闭</button>
+                            <button className="rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-sm" onClick={() => setSelected(null)}>関闭</button>
                         </div>
 
                         <div className="space-y-4 p-5">
@@ -707,6 +971,15 @@ export default function Home() {
                                 </div>
                                 <LabeledLine label="时间" text={`更新 ${selected.modified_date || "-"} / 发布 ${selected.published_date || "-"}`} />
                             </div>
+
+                            {Object.keys(repoData).length > 0 && (
+                                <div className="space-y-3">
+                                    <div className="text-xs font-semibold uppercase tracking-widest text-slate-400">GitHub 仓库</div>
+                                    {Object.entries(repoData).map(([key, data]) => (
+                                        <GitHubRepoCard key={key} repoKey={key} data={data} />
+                                    ))}
+                                </div>
+                            )}
 
                             <div className="rounded-xl bg-slate-950 p-4 text-white">
                                 <div className="text-xs uppercase tracking-widest text-slate-400">JSON</div>
@@ -853,6 +1126,180 @@ function DebugBlock({ title, text }: { title: string; text: string }) {
         <div className="rounded-xl border border-slate-200 bg-white p-4">
             <h3 className="text-sm font-semibold">{title}</h3>
             <pre className="mt-3 max-h-72 overflow-auto rounded border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">{text}</pre>
+        </div>
+    );
+}
+
+function LanguageBar({ languages }: { languages: LangEntry[] }) {
+    if (!languages.length) return null;
+    return (
+        <div>
+            <div className="flex h-2 w-full overflow-hidden rounded-full">
+                {languages.map((l) => (
+                    <div
+                        key={l.language}
+                        style={{ width: `${l.percent}%`, backgroundColor: LANG_COLORS[l.language] ?? "#8b949e" }}
+                        title={`${l.language}: ${l.percent}%`}
+                    />
+                ))}
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
+                {languages.slice(0, 8).map((l) => (
+                    <span key={l.language} className="flex items-center gap-1 text-[11px] text-slate-600">
+                        <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: LANG_COLORS[l.language] ?? "#8b949e" }} />
+                        {l.language}
+                        <span className="text-slate-400">{l.percent}%</span>
+                    </span>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function GitHubRepoCard({ repoKey, data }: { repoKey: string; data: RepoGithubData }) {
+    const [pkgsExpanded, setPkgsExpanded] = useState(false);
+    const [owner, repo] = repoKey.split("/");
+    const langs = data.langs?.status === "fetched" ? (data.langs.languages ?? []) : [];
+    const pkgs = data.deps?.status === "fetched" ? (data.deps.packages ?? []) : [];
+    const pkgCount = data.deps?.package_count ?? pkgs.length;
+
+    const ecosystems = Array.from(new Set(pkgs.map((p) => p.ecosystem ?? "other"))).sort();
+    const pkgsByEco: Record<string, PkgEntry[]> = {};
+    for (const p of pkgs) {
+        const eco = p.ecosystem ?? "other";
+        (pkgsByEco[eco] ??= []).push(p);
+    }
+
+    return (
+        <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 text-sm">
+            <div className="flex items-center justify-between gap-2">
+                <a
+                    href={`https://github.com/${owner}/${repo}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-mono text-xs font-semibold text-blue-700 hover:underline"
+                >
+                    {owner}/{repo}
+                </a>
+                {data.loading && <span className="text-[11px] text-slate-400">加载中…</span>}
+                {!data.loading && data.langs?.status && data.langs.status !== "fetched" && (
+                    <span className="text-[11px] text-slate-400">{data.langs.status}</span>
+                )}
+            </div>
+
+            {langs.length > 0 && (
+                <div className="mt-2">
+                    <LanguageBar languages={langs} />
+                </div>
+            )}
+
+            {pkgCount > 0 && (
+                <div className="mt-2">
+                    <button
+                        className="flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-700"
+                        onClick={() => setPkgsExpanded((v) => !v)}
+                    >
+                        <span>{pkgsExpanded ? "▾" : "▸"}</span>
+                        <span>{pkgCount} 个依赖包</span>
+                    </button>
+                    {pkgsExpanded && (
+                        <div className="mt-2 space-y-2">
+                            {ecosystems.map((eco) => (
+                                <div key={eco}>
+                                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{eco}</div>
+                                    <div className="mt-1 flex flex-wrap gap-1">
+                                        {(pkgsByEco[eco] ?? []).map((p, i) => (
+                                            <span
+                                                key={i}
+                                                className="rounded bg-white px-1.5 py-0.5 text-[11px] text-slate-700 ring-1 ring-slate-200"
+                                                title={p.version_info ?? undefined}
+                                            >
+                                                {p.package_name}
+                                                {p.version_info ? <span className="ml-1 text-slate-400">{p.version_info}</span> : null}
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {!data.loading && pkgCount === 0 && langs.length === 0 && data.deps?.status && (
+                <p className="mt-1 text-[11px] text-slate-400">
+                    deps: {data.deps.status}{data.langs?.status ? ` · langs: ${data.langs.status}` : ""}
+                </p>
+            )}
+        </div>
+    );
+}
+
+const STATUS_ORDER = ["fetched", "not_modified", "pending", "error", "skip_404", "skip_403"];
+
+function GithubStatsCard({
+    title,
+    stats,
+    totalKey,
+    totalLabel,
+}: {
+    title: string;
+    stats: Record<string, number> | null;
+    totalKey: string;
+    totalLabel: string;
+}) {
+    if (!stats) {
+        return (
+            <div className="rounded-xl border border-slate-200 bg-white p-4">
+                <h3 className="text-sm font-semibold">{title}</h3>
+                <p className="mt-3 text-xs text-slate-400">暂无数据，点击"刷新统计"加载。</p>
+            </div>
+        );
+    }
+
+    const statusEntries = STATUS_ORDER
+        .filter((s) => s in stats)
+        .map((s) => [s, stats[s]] as [string, number]);
+    const otherEntries = Object.entries(stats).filter(
+        ([k]) => !STATUS_ORDER.includes(k) && k !== totalKey && k !== "pending_by_priority"
+    );
+    const total = statusEntries.reduce((acc, [, v]) => acc + v, 0);
+
+    const statusColor: Record<string, string> = {
+        fetched: "text-emerald-700 bg-emerald-50",
+        not_modified: "text-sky-700 bg-sky-50",
+        pending: "text-amber-700 bg-amber-50",
+        error: "text-rose-700 bg-rose-50",
+        skip_404: "text-slate-500 bg-slate-100",
+        skip_403: "text-slate-500 bg-slate-100",
+    };
+
+    return (
+        <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+            <div className="flex items-baseline justify-between">
+                <h3 className="text-sm font-semibold">{title}</h3>
+                <span className="text-xs text-slate-500">{total} 仓库</span>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+                {statusEntries.map(([status, count]) => (
+                    <span key={status} className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${statusColor[status] ?? "text-slate-600 bg-slate-100"}`}>
+                        {status}: {count}
+                    </span>
+                ))}
+            </div>
+
+            {stats[totalKey] !== undefined && (
+                <p className="text-xs text-slate-500">{totalLabel}: {stats[totalKey].toLocaleString()}</p>
+            )}
+
+            {otherEntries.length > 0 && (
+                <div className="text-xs text-slate-500 space-y-0.5">
+                    {otherEntries.map(([k, v]) => (
+                        <div key={k}>{k}: {String(v)}</div>
+                    ))}
+                </div>
+            )}
         </div>
     );
 }
