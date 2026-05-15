@@ -11,12 +11,8 @@ from pathlib import Path
 from unittest import mock
 
 from vulndb_mirror.config import CrawlerSettings
-from vulndb_mirror.crawler.github_sbom import (
-    GitHubSbomCrawler,
-    ParsedPackage,
-    RepoRef,
-    SbomResult,
-)
+from vulndb_mirror.crawler.github.sbom import GitHubSbomCrawler, ParsedPackage, SbomResult
+from vulndb_mirror.crawler.github import RepoRef
 from vulndb_mirror.models import RawAVDEntry
 from vulndb_mirror.storage.github_deps.ingest_service import (
     GithubSbomIngestService,

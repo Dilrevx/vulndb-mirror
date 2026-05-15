@@ -1,11 +1,11 @@
-"""Orchestrator for the GitHub SBOM cache.
+"""Orchestrator for the GitHub languages cache.
 
 Two phases:
 
-* :meth:`GithubSbomIngestService.discover_from_recent` — pure DB pass over
-  ``raw_entries`` to extract GitHub repos and enqueue them.
-* :meth:`GithubSbomIngestService.run_worker` — drain the queue with bounded
-  concurrency, respecting GitHub rate limits.
+* :meth:`GithubLanguagesIngestService.discover_from_recent` — pure DB pass
+  over ``raw_entries`` to extract GitHub repos and enqueue them.
+* :meth:`GithubLanguagesIngestService.run_worker` — drain the queue with
+  bounded concurrency, respecting GitHub rate limits.
 """
 
 from __future__ import annotations
@@ -22,12 +22,12 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from vulndb_mirror.config import CrawlerSettings
-from vulndb_mirror.crawler.github.sbom import GitHubSbomCrawler, SbomResult
-from vulndb_mirror.crawler.github import RepoRef
+from vulndb_mirror.crawler.github.languages import GitHubLanguagesCrawler, LanguagesResult
+from vulndb_mirror.crawler.github import RepoRef, extract_repo_refs
 from vulndb_mirror.models import RawAVDEntry
-from vulndb_mirror.storage.github_deps.repository import (
-    GitHubSbomRepository,
-    SbomQueueItem,
+from vulndb_mirror.storage.github_language.repository import (
+    GitHubLanguagesRepository,
+    LanguagesQueueItem,
 )
 from vulndb_mirror.storage.raw.raw_models import now_iso
 from vulndb_mirror.storage.raw.repositories import RawRepository, SqliteRawRepository
@@ -80,7 +80,7 @@ class _HourlyTokenBucket:
             if stop is not None and stop.is_set():
                 return False
             logger.info(
-                "SBOM hourly budget reached (%d/h); sleeping %.0fs",
+                "Languages hourly budget reached (%d/h); sleeping %.0fs",
                 self._capacity,
                 wait,
             )
@@ -91,19 +91,19 @@ class _HourlyTokenBucket:
                 time.sleep(chunk)
 
 
-class GithubSbomIngestService:
+class GithubLanguagesIngestService:
     """High-level wrapper that ties discovery + worker together."""
 
     def __init__(
         self,
         settings: CrawlerSettings,
         raw_repo: RawRepository,
-        sbom_repo: GitHubSbomRepository,
-        crawler: GitHubSbomCrawler,
+        languages_repo: GitHubLanguagesRepository,
+        crawler: GitHubLanguagesCrawler,
     ) -> None:
         self.settings = settings
         self.raw_repo = raw_repo
-        self.sbom_repo = sbom_repo
+        self.languages_repo = languages_repo
         self.crawler = crawler
 
     # ------------------------------------------------------------------
@@ -117,11 +117,7 @@ class GithubSbomIngestService:
         since_iso: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> DiscoverResult:
-        """Scan recently-updated CVE rows; enqueue every GitHub repo found.
-
-        *since_iso* should be the previous sync timestamp (channels persist
-        this in their state file). When omitted, every row is scanned.
-        """
+        """Scan recently-updated CVE rows; enqueue every GitHub repo found."""
         rows_iter = _iter_raw_payloads(
             self.raw_repo, since_iso=since_iso, limit=limit
         )
@@ -135,18 +131,16 @@ class GithubSbomIngestService:
                 entry = RawAVDEntry.model_validate_json(payload)
             except Exception:
                 continue
-            refs = self.crawler.extract_repo_refs(
-                entry.references, entry.patch_urls
-            )
+            refs = extract_repo_refs(entry.references, entry.patch_urls)
             if not refs:
                 continue
             repos_seen += len(refs)
-            repos_enqueued += self.sbom_repo.enqueue_many(
+            repos_enqueued += self.languages_repo.enqueue_many(
                 refs, source_cve=cve_id
             )
 
         logger.info(
-            "SBOM discover: scanned=%d, repos_seen=%d, enqueued=%d (channel=%s)",
+            "Languages discover: scanned=%d, repos_seen=%d, enqueued=%d (channel=%s)",
             cves_scanned,
             repos_seen,
             repos_enqueued,
@@ -173,8 +167,8 @@ class GithubSbomIngestService:
         priority: Optional[int] = None,
     ) -> WorkerResult:
         """Drain pending rows until budget exhausted."""
-        thread_count = max(1, int(concurrency or self.settings.github_sbom_concurrency))
-        bucket = _HourlyTokenBucket(self.settings.github_sbom_hourly_budget)
+        thread_count = max(1, int(concurrency or self.settings.github_languages_concurrency))
+        bucket = _HourlyTokenBucket(self.settings.github_languages_hourly_budget)
 
         deadline = time.time() + max(1, int(max_seconds))
         result = WorkerResult()
@@ -185,7 +179,7 @@ class GithubSbomIngestService:
         with ThreadPoolExecutor(max_workers=thread_count) as pool:
             while remaining > 0 and time.time() < deadline:
                 batch_size = min(remaining, max(thread_count * 2, 8))
-                batch = self.sbom_repo.next_batch(
+                batch = self.languages_repo.next_batch(
                     batch_size, priority=priority
                 )
                 if not batch:
@@ -196,7 +190,6 @@ class GithubSbomIngestService:
                     stopped_reason = "rate_limit"
                     break
 
-                # First slot already consumed for the head item; reserve the rest.
                 reserved = [batch[0]]
                 for item in batch[1:]:
                     if time.time() >= deadline:
@@ -216,12 +209,12 @@ class GithubSbomIngestService:
                         outcome = fut.result()
                     except Exception as exc:
                         logger.warning(
-                            "SBOM worker exception for %s/%s: %s",
+                            "Languages worker exception for %s/%s: %s",
                             item.owner,
                             item.repo,
                             exc,
                         )
-                        self.sbom_repo.mark_status(
+                        self.languages_repo.mark_status(
                             item.owner,
                             item.repo,
                             status="error",
@@ -246,7 +239,7 @@ class GithubSbomIngestService:
         result.stopped_reason = stopped_reason
         result.finished_at = now_iso()
         logger.info(
-            "SBOM worker done: processed=%d fetched=%d not_modified=%d "
+            "Languages worker done: processed=%d fetched=%d not_modified=%d "
             "skip_404=%d skip_403=%d errors=%d elapsed=%.2fs reason=%s",
             result.processed,
             result.fetched,
@@ -270,32 +263,25 @@ class GithubSbomIngestService:
         priority: Optional[int] = None,
         discover_interval_seconds: int = 3600,
     ) -> None:
-        """Blocking service loop. Runs until SIGINT/SIGTERM.
-
-        Each cycle:
-        1. Discover repos from the last 30 days across all *raw_repos* channels.
-        2. Drain the queue (respecting hourly budget; sleeps when rate-limited).
-        3. When queue empties, do a full discover (no time filter) to catch
-           older CVEs, then drain again.
-        4. Sleep until the next discover interval, then repeat.
-        """
+        """Blocking service loop. Runs until SIGINT/SIGTERM."""
         stop = threading.Event()
 
         def _on_signal(sig: int, _frame: object) -> None:
-            logger.info("SBOM service: signal %d received, stopping after current batch", sig)
+            logger.info("Languages service: signal %d received, stopping after current batch", sig)
             stop.set()
 
         signal.signal(signal.SIGINT, _on_signal)
         signal.signal(signal.SIGTERM, _on_signal)
 
-        thread_count = max(1, int(self.settings.github_sbom_concurrency))
+        thread_count = max(1, int(self.settings.github_languages_concurrency))
+        bucket = _HourlyTokenBucket(self.settings.github_languages_hourly_budget)
 
         last_discover_at: float = 0.0
         full_discover_done = False
         total_processed = 0
 
         logger.info(
-            "SBOM service started: channels=%s priority=%s interval=%ds",
+            "Languages service started: channels=%s priority=%s interval=%ds",
             list(raw_repos),
             priority,
             discover_interval_seconds,
@@ -305,7 +291,6 @@ class GithubSbomIngestService:
             while not stop.is_set():
                 now = time.time()
 
-                # Periodic discover: recent 30 days
                 if now - last_discover_at >= discover_interval_seconds:
                     since_30d = (
                         datetime.utcnow() - timedelta(days=30)
@@ -316,14 +301,13 @@ class GithubSbomIngestService:
                     last_discover_at = time.time()
                     full_discover_done = False
 
-                # Pull next batch
-                batch = self.sbom_repo.next_batch(
+                batch = self.languages_repo.next_batch(
                     max(thread_count * 2, 8), priority=priority
                 )
 
                 if not batch:
                     if not full_discover_done:
-                        logger.info("SBOM service: recent queue empty, running full discover...")
+                        logger.info("Languages service: recent queue empty, running full discover...")
                         for ch, repo in raw_repos.items():
                             self.raw_repo = repo
                             self.discover_from_recent(channel=ch, since_iso=None)
@@ -331,12 +315,11 @@ class GithubSbomIngestService:
                         continue
                     wait = max(10.0, discover_interval_seconds - (time.time() - last_discover_at))
                     logger.info(
-                        "SBOM service: queue empty, sleeping %.0fs until next discover", wait
+                        "Languages service: queue empty, sleeping %.0fs until next discover", wait
                     )
                     stop.wait(min(wait, 60))
                     continue
 
-                # Acquire rate-limit tokens for each item in the batch
                 reserved = []
                 for item in batch:
                     if stop.is_set():
@@ -358,39 +341,37 @@ class GithubSbomIngestService:
                         outcome = fut.result()
                         _accumulate_log(item, outcome)
                     except Exception as exc:
-                        logger.warning("SBOM %s/%s error: %s", item.owner, item.repo, exc)
-                        self.sbom_repo.mark_status(
+                        logger.warning("Languages %s/%s error: %s", item.owner, item.repo, exc)
+                        self.languages_repo.mark_status(
                             item.owner, item.repo,
                             status="error", http_status=None, error=str(exc),
                         )
                     total_processed += 1
                     if total_processed % 100 == 0:
-                        logger.info("SBOM service: total_processed=%d", total_processed)
+                        logger.info("Languages service: total_processed=%d", total_processed)
 
-        logger.info("SBOM service stopped. total_processed=%d", total_processed)
+        logger.info("Languages service stopped. total_processed=%d", total_processed)
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _process_one(self, item: SbomQueueItem) -> SbomResult:
-        result = self.crawler.fetch_sbom(
-            item.owner, item.repo, etag=item.sbom_etag
+    def _process_one(self, item: LanguagesQueueItem) -> LanguagesResult:
+        result = self.crawler.fetch_languages(
+            item.owner, item.repo, etag=item.languages_etag
         )
         if result.status == "fetched" and result.payload is not None:
-            packages = self.crawler.parse_sbom(result.payload)
-            self.sbom_repo.upsert_sbom(
+            self.languages_repo.upsert_languages(
                 item.owner,
                 item.repo,
                 payload=result.payload,
-                packages=packages,
                 etag=result.etag,
                 http_status=result.http_status or 200,
             )
         elif result.status == "not_modified":
-            self.sbom_repo.touch_not_modified(item.owner, item.repo)
+            self.languages_repo.touch_not_modified(item.owner, item.repo)
         else:
-            self.sbom_repo.mark_status(
+            self.languages_repo.mark_status(
                 item.owner,
                 item.repo,
                 status=result.status,
@@ -400,7 +381,7 @@ class GithubSbomIngestService:
         return result
 
 
-def _accumulate(acc: WorkerResult, outcome: SbomResult) -> None:
+def _accumulate(acc: WorkerResult, outcome: LanguagesResult) -> None:
     if outcome.status == "fetched":
         acc.fetched += 1
     elif outcome.status == "not_modified":
@@ -413,9 +394,9 @@ def _accumulate(acc: WorkerResult, outcome: SbomResult) -> None:
         acc.errors += 1
 
 
-def _accumulate_log(item: SbomQueueItem, outcome: SbomResult) -> None:
+def _accumulate_log(item: LanguagesQueueItem, outcome: LanguagesResult) -> None:
     if outcome.status not in ("fetched", "not_modified"):
-        logger.debug("SBOM %s/%s → %s", item.owner, item.repo, outcome.status)
+        logger.debug("Languages %s/%s → %s", item.owner, item.repo, outcome.status)
 
 
 def _iter_raw_payloads(
@@ -424,12 +405,6 @@ def _iter_raw_payloads(
     since_iso: Optional[str],
     limit: Optional[int],
 ):
-    """Stream ``(cve_id, payload_json)`` rows from the underlying SQLite store.
-
-    Uses :class:`SqliteRawRepository`'s own connection helper when available,
-    falling back to scanning ``list_cve_ids`` + ``get_raw`` (slower but works
-    for any :class:`RawRepository` implementation).
-    """
     sqlite_repo = _resolve_sqlite_repo(raw_repo)
     if sqlite_repo is not None:
         clauses: list[str] = []
@@ -444,16 +419,12 @@ def _iter_raw_payloads(
         if limit is not None:
             sql += " LIMIT ?"
             args.append(int(limit))
-        with sqlite_repo._connect() as conn:  # noqa: SLF001 — same package
-            # Fully materialise so the read connection closes before the
-            # caller starts issuing writes (sqlite default journal locks
-            # the file otherwise).
+        with sqlite_repo._connect() as conn:  # noqa: SLF001
             rows = conn.execute(sql, args).fetchall()
         for row in rows:
             yield row["cve_id"], row["payload"]
         return
 
-    # Fallback: full enumeration via the abstract interface.
     cve_ids = raw_repo.list_cve_ids()
     if limit is not None:
         cve_ids = cve_ids[: int(limit)]
@@ -477,7 +448,7 @@ def _resolve_sqlite_repo(raw_repo: RawRepository) -> Optional[SqliteRawRepositor
 
 
 __all__ = [
-    "GithubSbomIngestService",
+    "GithubLanguagesIngestService",
     "DiscoverResult",
     "WorkerResult",
 ]

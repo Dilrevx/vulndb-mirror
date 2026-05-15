@@ -9,6 +9,10 @@ from vulndb_mirror.storage.github_deps.ingest_service import (
     GithubSbomIngestService,
 )
 from vulndb_mirror.storage.github_deps.repository import GitHubSbomRepository
+from vulndb_mirror.storage.github_language.ingest_service import (
+    GithubLanguagesIngestService,
+)
+from vulndb_mirror.storage.github_language.repository import GitHubLanguagesRepository
 from vulndb_mirror.storage.raw.ingest_service import RawIngestService
 from vulndb_mirror.storage.raw.raw_models import RetryRequest
 from vulndb_mirror.storage.raw.repositories import RawRepository
@@ -20,6 +24,8 @@ def create_app(
     *,
     sbom_repo: Optional[GitHubSbomRepository] = None,
     sbom_service: Optional[GithubSbomIngestService] = None,
+    languages_repo: Optional[GitHubLanguagesRepository] = None,
+    languages_service: Optional[GithubLanguagesIngestService] = None,
 ) -> FastAPI:
     channel_names = list(repositories.keys())
 
@@ -198,6 +204,72 @@ def create_app(
         priority: Optional[int] = Query(default=None, ge=0, le=1),
     ):
         result = _require_sbom_service().run_worker(
+            max_repos=max_repos,
+            max_seconds=max_seconds,
+            priority=priority,
+        )
+        return result.model_dump()
+
+    # ---- GitHub Languages cache -----------------------------------------
+
+    def _require_languages_repo() -> GitHubLanguagesRepository:
+        if languages_repo is None:
+            raise HTTPException(
+                status_code=503, detail="github-languages not configured"
+            )
+        return languages_repo
+
+    def _require_languages_service() -> GithubLanguagesIngestService:
+        if languages_service is None:
+            raise HTTPException(
+                status_code=503, detail="github-languages not configured"
+            )
+        return languages_service
+
+    @app.get("/github-languages/stats")
+    def github_languages_stats():
+        return _require_languages_repo().stats()
+
+    @app.get("/github-languages/by-language")
+    def github_languages_by_language(
+        name: str = Query(..., min_length=1),
+        limit: int = Query(default=100, ge=1, le=500),
+    ):
+        return {
+            "items": _require_languages_repo().query_by_language(
+                language=name, limit=limit
+            )
+        }
+
+    @app.get("/github-languages/{owner}/{repo}")
+    def github_languages_by_repo(owner: str, repo: str):
+        item = _require_languages_repo().query_by_repo(owner.lower(), repo.lower())
+        if item is None:
+            raise HTTPException(status_code=404, detail="not found")
+        return item
+
+    @app.post("/ops/github-languages/discover")
+    def ops_github_languages_discover(
+        channel: str = Query(default="cvelistv5"),
+        since_iso: Optional[str] = Query(default=None),
+        limit: Optional[int] = Query(default=None, ge=1),
+    ):
+        svc = _require_languages_service()
+        if channel not in repositories:
+            raise HTTPException(status_code=400, detail=f"unknown channel: {channel}")
+        svc.raw_repo = repositories[channel]
+        result = svc.discover_from_recent(
+            channel=channel, since_iso=since_iso, limit=limit
+        )
+        return result.model_dump()
+
+    @app.post("/ops/github-languages/sync")
+    def ops_github_languages_sync(
+        max_repos: int = Query(default=200, ge=1),
+        max_seconds: int = Query(default=300, ge=1),
+        priority: Optional[int] = Query(default=None, ge=0, le=1),
+    ):
+        result = _require_languages_service().run_worker(
             max_repos=max_repos,
             max_seconds=max_seconds,
             priority=priority,

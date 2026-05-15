@@ -8,7 +8,7 @@ from typing import Literal, Optional
 from playwright.async_api import async_playwright
 
 from vulndb_mirror.config import CrawlConfig
-from vulndb_mirror.crawler.core import _BROWSER_ARGS, _STEALTH, _USER_AGENT, AVDCrawler
+from vulndb_mirror.crawler.cve.aliyun import _BROWSER_ARGS, _STEALTH, _USER_AGENT, AVDCrawler
 from .raw_models import (
     CrawlPhaseResult,
     CrawlRunResult,

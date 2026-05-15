@@ -15,7 +15,7 @@ from typing import Callable, Optional
 from pydantic import BaseModel, Field
 
 from vulndb_mirror.config import CrawlConfig
-from vulndb_mirror.crawler.trickest import TrickestCrawler
+from vulndb_mirror.crawler.cve.trickest import TrickestCrawler
 from .raw_models import now_iso
 from .repositories import RawRepository
 

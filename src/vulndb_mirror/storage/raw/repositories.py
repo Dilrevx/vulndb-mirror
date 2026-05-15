@@ -403,6 +403,7 @@ class SqliteRawRepository(RawRepository):
                 """
             )
             self._init_github_sbom_tables(conn)
+            self._init_github_languages_tables(conn)
             self._search_index_enabled = self._ensure_search_index(conn)
             conn.commit()
         self._refresh_page_tracking_if_stale()
@@ -466,6 +467,52 @@ class SqliteRawRepository(RawRepository):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sbom_pkg_lookup "
             "ON github_sbom_packages(ecosystem, package_name)"
+        )
+
+    def _init_github_languages_tables(self, conn: sqlite3.Connection) -> None:
+        """Bootstrap the GitHub languages cache tables."""
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS github_languages_cache (
+                owner          TEXT NOT NULL,
+                repo           TEXT NOT NULL,
+                status         TEXT NOT NULL DEFAULT 'pending',
+                priority       INTEGER NOT NULL DEFAULT 1,
+                http_status    INTEGER,
+                error_message  TEXT,
+                languages_etag TEXT,
+                source_cves    TEXT NOT NULL DEFAULT '[]',
+                enqueued_at    TEXT NOT NULL,
+                fetched_at     TEXT,
+                updated_at     TEXT NOT NULL,
+                PRIMARY KEY (owner, repo)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_lang_cache_queue "
+            "ON github_languages_cache(status, priority, enqueued_at)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS github_languages_data (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner     TEXT NOT NULL,
+                repo      TEXT NOT NULL,
+                language  TEXT NOT NULL,
+                bytes     INTEGER NOT NULL,
+                FOREIGN KEY (owner, repo)
+                    REFERENCES github_languages_cache(owner, repo) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_lang_data_repo "
+            "ON github_languages_data(owner, repo)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_lang_data_lookup "
+            "ON github_languages_data(language)"
         )
 
     def _ensure_search_index(self, conn: sqlite3.Connection) -> bool:

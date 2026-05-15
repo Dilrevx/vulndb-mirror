@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import unittest
 
-from vulndb_mirror.crawler.github_sbom import (
-    GitHubSbomCrawler,
-    ParsedPackage,
-    RepoRef,
-    _parse_repo_url,
-)
+from vulndb_mirror.crawler.github.sbom import GitHubSbomCrawler, ParsedPackage
+from vulndb_mirror.crawler.github import RepoRef
+from vulndb_mirror.crawler.github._refs import _parse_repo_url
 
 
 class ParseRepoUrlTests(unittest.TestCase):

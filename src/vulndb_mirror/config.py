@@ -220,6 +220,23 @@ class CrawlerSettings(BaseSettings):
         description="Max wall-clock seconds the auto-trigger worker is allowed to run",
     )
 
+    # GitHub Languages cache settings
+    github_languages_sqlite_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "SQLite file holding the languages cache. Defaults to the cvelistv5 "
+            "channel raw.db so it co-locates with the raw CVE data."
+        ),
+    )
+    github_languages_concurrency: int = Field(
+        default=4,
+        description="Worker thread count for parallel languages fetches",
+    )
+    github_languages_hourly_budget: int = Field(
+        default=4500,
+        description="Per-process hourly request cap for the languages worker",
+    )
+
     # Logging
     log_dir: Optional[str] = Field(
         default="./logs",

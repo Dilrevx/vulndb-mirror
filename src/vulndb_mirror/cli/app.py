@@ -10,12 +10,17 @@ from typing import Optional
 import uvicorn
 
 from vulndb_mirror.config import CrawlerSettings
-from vulndb_mirror.crawler.github_sbom import GitHubSbomCrawler
+from vulndb_mirror.crawler.github.sbom import GitHubSbomCrawler
+from vulndb_mirror.crawler.github.languages import GitHubLanguagesCrawler
 from vulndb_mirror.server.api import create_app
 from vulndb_mirror.storage.github_deps.ingest_service import (
     GithubSbomIngestService,
 )
 from vulndb_mirror.storage.github_deps.repository import GitHubSbomRepository
+from vulndb_mirror.storage.github_language.ingest_service import (
+    GithubLanguagesIngestService,
+)
+from vulndb_mirror.storage.github_language.repository import GitHubLanguagesRepository
 from vulndb_mirror.storage.raw.ingest_service import RawIngestService
 from vulndb_mirror.storage.raw.repositories import RawRepository
 from vulndb_mirror.storage.raw.repository_factory import build_raw_repository
@@ -111,6 +116,44 @@ def _build_parser() -> argparse.ArgumentParser:
         default="cvelistv5",
         choices=["cvelistv5", "trickest_cve", "aliyun"],
     )
+
+    langs = sub.add_parser(
+        "github-languages",
+        help="GitHub repository language composition cache",
+    )
+    langs_sub = langs.add_subparsers(dest="langs_command", required=True)
+
+    langs_run = langs_sub.add_parser(
+        "run",
+        help="start long-running languages service (suitable for tmux)",
+    )
+    langs_run.add_argument(
+        "--channel",
+        nargs="+",
+        default=["cvelistv5"],
+        choices=["cvelistv5", "trickest_cve", "aliyun"],
+        help="raw repository channels to scan for repos (default: cvelistv5)",
+    )
+    langs_run.add_argument(
+        "--patch-only",
+        action="store_true",
+        default=False,
+        help="only process priority-0 repos (those from patch_urls)",
+    )
+    langs_run.add_argument(
+        "--discover-interval",
+        type=int,
+        default=3600,
+        metavar="SECONDS",
+        help="seconds between periodic re-discovers of recent CVEs (default: 3600)",
+    )
+
+    langs_stats = langs_sub.add_parser("stats", help="show languages cache stats")
+    langs_stats.add_argument(
+        "--channel",
+        default="cvelistv5",
+        choices=["cvelistv5", "trickest_cve", "aliyun"],
+    )
     return parser
 
 
@@ -148,6 +191,38 @@ def _build_sbom_service(
         settings=settings,
         raw_repo=raw_repo,
         sbom_repo=sbom_repo,
+        crawler=crawler,
+    )
+
+
+def _resolve_languages_sqlite_path(
+    settings: CrawlerSettings, *, channel: str
+) -> str:
+    if settings.github_languages_sqlite_path:
+        return settings.github_languages_sqlite_path
+    if channel == "trickest_cve":
+        base = settings.trickest_data_dir
+    elif channel == "aliyun":
+        base = settings.data_dir
+    else:
+        base = settings.cvelistv5_data_dir
+    return str(Path(base) / "raw.db")
+
+
+def _build_languages_service(
+    settings: CrawlerSettings,
+    raw_repo: RawRepository,
+    *,
+    channel: str,
+) -> GithubLanguagesIngestService:
+    languages_repo = GitHubLanguagesRepository(
+        sqlite_path=_resolve_languages_sqlite_path(settings, channel=channel)
+    )
+    crawler = GitHubLanguagesCrawler(github_token=settings.github_token)
+    return GithubLanguagesIngestService(
+        settings=settings,
+        raw_repo=raw_repo,
+        languages_repo=languages_repo,
         crawler=crawler,
     )
 
@@ -213,11 +288,23 @@ def main() -> None:
             crawler=GitHubSbomCrawler(github_token=settings.github_token),
         )
 
+        languages_repo = GitHubLanguagesRepository(
+            sqlite_path=_resolve_languages_sqlite_path(settings, channel="cvelistv5")
+        )
+        languages_service = GithubLanguagesIngestService(
+            settings=settings,
+            raw_repo=cvelistv5_repo,
+            languages_repo=languages_repo,
+            crawler=GitHubLanguagesCrawler(github_token=settings.github_token),
+        )
+
         app = create_app(
             repositories,
             services,
             sbom_repo=sbom_repo,
             sbom_service=sbom_service,
+            languages_repo=languages_repo,
+            languages_service=languages_service,
         )
         uvicorn.run(
             app,
@@ -262,6 +349,44 @@ def main() -> None:
                 stats_raw = build_raw_repository(settings)
             sbom_service = _build_sbom_service(settings, stats_raw, channel=stats_channel)
             print(json.dumps(sbom_service.sbom_repo.stats(), ensure_ascii=False, indent=2))
+            return
+
+        return
+
+    # --- GitHub Languages service --------------------------------------------
+    if args.command == "github-languages":
+        if args.langs_command == "run":
+            channels: list[str] = args.channel
+            raw_repos: dict[str, RawRepository] = {}
+            for ch in channels:
+                if ch == "trickest_cve":
+                    raw_repos[ch] = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
+                elif ch == "cvelistv5":
+                    raw_repos[ch] = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
+                else:
+                    raw_repos[ch] = build_raw_repository(settings)
+            primary_channel = "cvelistv5" if "cvelistv5" in channels else channels[0]
+            langs_service = _build_languages_service(
+                settings, raw_repos[primary_channel], channel=primary_channel
+            )
+            priority = 0 if args.patch_only else None
+            langs_service.run_service(
+                raw_repos=raw_repos,
+                priority=priority,
+                discover_interval_seconds=args.discover_interval,
+            )
+            return
+
+        if args.langs_command == "stats":
+            stats_channel = args.channel
+            if stats_channel == "trickest_cve":
+                stats_raw = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
+            elif stats_channel == "cvelistv5":
+                stats_raw = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
+            else:
+                stats_raw = build_raw_repository(settings)
+            langs_service = _build_languages_service(settings, stats_raw, channel=stats_channel)
+            print(json.dumps(langs_service.languages_repo.stats(), ensure_ascii=False, indent=2))
             return
 
         return
