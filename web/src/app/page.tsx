@@ -1,258 +1,22 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-
-type RawItem = {
-    cve_id: string;
-    title?: string;
-    description?: string;
-    severity?: string;
-    cvss_score?: number | null;
-    cvss_vector?: string;
-    cwe_id?: string;
-    cwe_description?: string;
-    published_date?: string | null;
-    modified_date?: string | null;
-    references?: string[];
-    patch_urls?: string[];
-    detail_url?: string;
-};
-
-type QueryResp = {
-    page: number;
-    page_size: number;
-    total: number;
-    items: RawItem[];
-};
-
-type CheckpointItem = {
-    page: number;
-    status: string;
-    entry_count: number;
-    has_next: boolean;
-    error?: string | null;
-    updated_at: string;
-};
-
-type GapsResp = {
-    gaps: Array<{ start_page: number; end_page: number; reason: string }>;
-    meta: Record<string, unknown>;
-};
-
-type CheckpointsResp = {
-    items: CheckpointItem[];
-    meta: Record<string, unknown>;
-};
-
-type TabMode = "search" | "debug" | "github";
-type TriMode = "all" | "yes" | "no";
-type PoCRuleMode = "balanced" | "strict" | "loose";
-type ChannelId = string;
-
-type SmartSearchTokens = {
-    text: string[];
-    cve: string;
-    cwe: string;
-    severity: string;
-    patch: TriMode;
-    poc: TriMode;
-};
-
-type FilterDraft = {
-    search: string;
-    patchOnly: TriMode;
-    pocOnly: TriMode;
-    refOnly: TriMode;
-    detailOnly: TriMode;
-    pocRuleMode: PoCRuleMode;
-    showAdvanced: boolean;
-    from: string;
-    to: string;
-};
-
-type LangEntry = { language: string; bytes: number; percent: number };
-type PkgEntry = {
-    manifest_path: string | null;
-    ecosystem: string | null;
-    package_name: string;
-    version_info: string | null;
-    relationship: string | null;
-};
-type GithubLangsData = { status: string; languages: LangEntry[] };
-type GithubDepsData = { status: string; package_count: number; packages: PkgEntry[] };
-type RepoGithubData = { langs: GithubLangsData | null; deps: GithubDepsData | null; loading: boolean };
-
-type PkgByPackageItem = {
-    owner: string; repo: string; manifest_path: string | null;
-    ecosystem: string | null; package_name: string; version_info: string | null;
-    relationship: string | null; priority: number; source_cves: string[]; fetched_at: string | null;
-};
-type LangByLanguageItem = {
-    owner: string; repo: string; language: string; bytes: number;
-    priority: number; source_cves: string[]; fetched_at: string | null;
-};
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") || "http://127.0.0.1:8787";
-
-const LANG_COLORS: Record<string, string> = {
-    JavaScript: "#f1e05a", TypeScript: "#3178c6", Python: "#3572A5",
-    Java: "#b07219", Go: "#00ADD8", Rust: "#dea584",
-    C: "#555555", "C++": "#f34b7d", "C#": "#178600",
-    Ruby: "#701516", PHP: "#4F5D95", Swift: "#F05138",
-    Kotlin: "#A97BFF", Scala: "#c22d40", Shell: "#89e051",
-    HTML: "#e34c26", CSS: "#563d7c", Vue: "#41b883",
-    Dockerfile: "#384d54", Makefile: "#427819",
-};
-
-const _GH_REPO_RE = /^https?:\/\/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?(?:[/?#].*)?$/i;
-function parseGithubRepos(urls: string[]): Array<{ owner: string; repo: string }> {
-    const seen = new Set<string>();
-    const result: Array<{ owner: string; repo: string }> = [];
-    for (const url of urls) {
-        const m = _GH_REPO_RE.exec(url.trim());
-        if (!m) continue;
-        const owner = m[1].toLowerCase();
-        const repo = m[2].toLowerCase().replace(/\.git$/, "");
-        const key = `${owner}/${repo}`;
-        if (!seen.has(key)) { seen.add(key); result.push({ owner, repo }); }
-    }
-    return result;
-}
-
-const DEFAULT_FILTERS: FilterDraft = {
-    search: "",
-    patchOnly: "all",
-    pocOnly: "all",
-    refOnly: "all",
-    detailOnly: "all",
-    pocRuleMode: "balanced",
-    showAdvanced: false,
-    from: "",
-    to: "",
-};
-
-async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(`${API_BASE}${path}`, {
-        cache: "no-store",
-        ...init,
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
-    return (await response.json()) as T;
-}
-
-async function apiPost<T>(path: string, body: unknown): Promise<T> {
-    const response = await fetch(`${API_BASE}${path}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
-    return (await response.json()) as T;
-}
-
-function scoreText(score?: number | null): string {
-    return score === null || score === undefined ? "-" : score.toFixed(1);
-}
-
-function normalizeTri(value: string | null): TriMode {
-    if (value === "yes" || value === "no") return value;
-    return "all";
-}
-
-function normalizeRule(value: string | null): PoCRuleMode {
-    if (value === "strict" || value === "loose") return value;
-    return "balanced";
-}
-
-function normalizeSearchInput(raw: string): string {
-    return raw
-        .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFE58\uFE63\uFF0D]/g, "-")
-        .replace(/[\uFF1A\uFE55\u2236]/g, ":")
-        .trim();
-}
-
-function parseSmartSearch(raw: string): SmartSearchTokens {
-    raw = normalizeSearchInput(raw);
-    const result: SmartSearchTokens = { text: [], cve: "", cwe: "", severity: "", patch: "all", poc: "all" };
-    const tokens = raw.trim().split(/\s+/).filter(Boolean);
-    for (const token of tokens) {
-        const lower = token.toLowerCase();
-        if (lower.startsWith("cve:")) {
-            result.cve = lower.slice(4);
-            continue;
-        }
-        if (lower.startsWith("cwe:")) {
-            result.cwe = lower.slice(4);
-            continue;
-        }
-        if (lower.startsWith("sev:")) {
-            result.severity = lower.slice(4);
-            continue;
-        }
-        if (lower === "patch:yes" || lower === "patch:no") {
-            result.patch = lower.endsWith("yes") ? "yes" : "no";
-            continue;
-        }
-        if (lower === "poc:yes" || lower === "poc:no") {
-            result.poc = lower.endsWith("yes") ? "yes" : "no";
-            continue;
-        }
-        result.text.push(lower);
-    }
-    return result;
-}
-
-function riskTone(severity?: string): "critical" | "high" | "medium" | "low" {
-    const low = (severity || "").toLowerCase();
-    if (low.includes("严重") || low.includes("critical")) return "critical";
-    if (low.includes("高危") || low.includes("high")) return "high";
-    if (low.includes("中危") || low.includes("medium")) return "medium";
-    return "low";
-}
-
-function toneClass(kind: "critical" | "high" | "medium" | "low" | "warning" | "info" | "muted"): string {
-    if (kind === "critical") return "bg-rose-600/15 text-rose-700 ring-rose-600/20";
-    if (kind === "high") return "bg-amber-500/15 text-amber-700 ring-amber-500/20";
-    if (kind === "medium") return "bg-sky-500/15 text-sky-700 ring-sky-500/20";
-    if (kind === "warning") return "bg-violet-500/15 text-violet-700 ring-violet-500/20";
-    if (kind === "info") return "bg-cyan-500/15 text-cyan-700 ring-cyan-500/20";
-    if (kind === "low") return "bg-emerald-500/15 text-emerald-700 ring-emerald-500/20";
-    return "bg-slate-500/10 text-slate-600 ring-slate-500/20";
-}
-
-function summarizePoc(item: RawItem, mode: PoCRuleMode): { label: string; tone: "warning" | "info" | "muted" } {
-    const refs = item.references || [];
-    const patches = item.patch_urls || [];
-    const text = `${item.title || ""} ${item.description || ""} ${refs.join(" ")}`.toLowerCase();
-    const hasPocWords = /poc|proof\s*of\s*concept|exploit|exp\b|payload|reproduce/.test(text);
-    if (mode === "strict") {
-        if (patches.length > 0 && hasPocWords) return { label: "疑似 PoC", tone: "warning" };
-        if (hasPocWords) return { label: "PoC 命中", tone: "warning" };
-        return { label: "未见 PoC 线索", tone: "muted" };
-    }
-    if (mode === "loose") {
-        if (hasPocWords) return { label: "PoC 线索", tone: "warning" };
-        if (patches.length > 0 && refs.length > 0) return { label: "补丁/引用齐全", tone: "info" };
-        return { label: "未见 PoC 线索", tone: "muted" };
-    }
-    if (patches.length > 0 && hasPocWords) return { label: "疑似 PoC", tone: "warning" };
-    if (patches.length > 0 && refs.length > 0) return { label: "有补丁线索", tone: "info" };
-    if (hasPocWords) return { label: "PoC 线索", tone: "warning" };
-    return { label: "未见 PoC 线索", tone: "muted" };
-}
-
-function trimUrl(url: string, keep = 56): string {
-    try {
-        const u = new URL(url);
-        const text = `${u.hostname}${u.pathname}${u.search}`;
-        return text.length <= keep ? text : `${text.slice(0, keep)}...`;
-    } catch {
-        return url.length <= keep ? url : `${url.slice(0, keep)}...`;
-    }
-}
-
-function unique(items: string[]): string[] {
-    return Array.from(new Set(items.filter(Boolean)));
-}
+import type {
+    ChannelId, CheckpointsResp, FilterDraft, GapsResp,
+    GithubDepsData, GithubLangsData, LangByLanguageItem,
+    PkgByPackageItem, QueryResp, RawItem, RepoGithubData, TabMode,
+} from "@/types";
+import { apiGet, apiPost } from "@/lib/api";
+import {
+    DEFAULT_FILTERS, normalizeRule, normalizeSearchInput, normalizeTri,
+    parseGithubRepos, parseSmartSearch, riskTone, scoreText, summarizePoc,
+} from "@/lib/utils";
+import { TabButton } from "@/components/TabButton";
+import { LabeledLine } from "@/components/LabeledLine";
+import { CollapsibleText } from "@/components/CollapsibleText";
+import { GitHubRepoCard } from "@/components/GitHubRepoCard";
+import { SearchTab } from "@/tabs/SearchTab";
+import { DebugTab } from "@/tabs/DebugTab";
+import { GithubTab } from "@/tabs/GithubTab";
 
 export default function Home() {
     const [activeTab, setActiveTab] = useState<TabMode>("search");
@@ -281,7 +45,6 @@ export default function Home() {
     const querySeqRef = useRef(0);
     const queryAbortRef = useRef<AbortController | null>(null);
 
-    // GitHub cache tab state
     const [depsStats, setDepsStats] = useState<Record<string, number> | null>(null);
     const [langsStats, setLangsStats] = useState<Record<string, number> | null>(null);
     const [statsLoading, setStatsLoading] = useState(false);
@@ -301,19 +64,10 @@ export default function Home() {
         const items = query?.items || [];
         return items.filter((item) => {
             const pool = [
-                item.cve_id,
-                item.title,
-                item.description,
-                item.cwe_id,
-                item.cwe_description,
-                item.severity,
-                item.cvss_vector,
-                ...(item.references || []),
-                ...(item.patch_urls || []),
-            ]
-                .filter(Boolean)
-                .join(" ")
-                .toLowerCase();
+                item.cve_id, item.title, item.description, item.cwe_id,
+                item.cwe_description, item.severity, item.cvss_vector,
+                ...(item.references || []), ...(item.patch_urls || []),
+            ].filter(Boolean).join(" ").toLowerCase();
 
             if (searchTokens.text.length && !searchTokens.text.every((t) => pool.includes(t))) return false;
             if (searchTokens.cve && !item.cve_id.toLowerCase().includes(searchTokens.cve)) return false;
@@ -349,7 +103,6 @@ export default function Home() {
     }, [filteredRows, applied.pocRuleMode]);
 
     const totalPages = Math.max(1, Math.ceil((query?.total ?? 0) / pageSize));
-
     const hasUnappliedChanges = JSON.stringify(draft) !== JSON.stringify(applied);
 
     async function runQuery(targetPage = page, targetPageSize = pageSize, filters = applied, ch = channel): Promise<void> {
@@ -442,9 +195,7 @@ export default function Home() {
             }
         })();
 
-        return () => {
-            mounted = false;
-        };
+        return () => { mounted = false; };
     }, []);
 
     useEffect(() => {
@@ -545,10 +296,7 @@ export default function Home() {
 
     async function debugRetryPages(): Promise<void> {
         const parsed = retryPages.split(/[\s,]+/).map((x) => Number(x)).filter((x) => Number.isInteger(x) && x > 0);
-        if (!parsed.length) {
-            setRetryResult("Please enter page numbers, e.g. 50 51 52");
-            return;
-        }
+        if (!parsed.length) { setRetryResult("Please enter page numbers, e.g. 50 51 52"); return; }
         try {
             const data = await apiPost("/ops/aliyun/retry", { pages: parsed });
             setRetryResult(JSON.stringify(data, null, 2));
@@ -626,326 +374,61 @@ export default function Home() {
                 </div>
 
                 {activeTab === "search" ? (
-                    <div className="mt-4 grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
-                        <aside className="sticky top-4 self-start rounded-xl border border-slate-200 bg-white p-3 shadow-[0_8px_25px_rgba(15,23,42,0.06)]">
-                            <div className="flex items-center justify-between">
-                                <div>
-                                    <h2 className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-600">Filters</h2>
-                                    <p className="mt-1 text-[11px] text-slate-500">大数据场景下仅在点击应用后筛选</p>
-                                </div>
-                                <button
-                                    className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-700"
-                                    onClick={() => setDraft((prev) => ({ ...prev, showAdvanced: !prev.showAdvanced }))}
-                                >
-                                    {draft.showAdvanced ? "收起" : "高级"}
-                                </button>
-                            </div>
-
-                            <div className="mt-3 rounded border border-slate-200 bg-slate-50 px-2 py-2 text-[11px] text-slate-600">
-                                <div className="flex items-center justify-between gap-2">
-                                    <span className="truncate">{API_BASE}</span>
-                                    <span className={`rounded-full px-2 py-0.5 ${loading ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
-                                        {loading ? "同步中" : "在线"}
-                                    </span>
-                                </div>
-                                <div className="mt-1 flex items-center justify-between text-slate-500">
-                                    <span>{query?.total ?? 0} total</span>
-                                    <span>{page}/{totalPages}</span>
-                                </div>
-                            </div>
-
-                            <div className="mt-3 space-y-2">
-                                <input
-                                    className="w-full rounded border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
-                                    placeholder="cve:CVE-2024 cwe:79 sev:high patch:yes poc:no nginx"
-                                    value={draft.search}
-                                    onChange={(e) => setDraft((prev) => ({ ...prev, search: e.target.value }))}
-                                />
-
-                                <div className="grid grid-cols-2 gap-2">
-                                    <select className="rounded border border-slate-200 bg-white px-2 py-2 text-sm" value={draft.patchOnly} onChange={(e) => setDraft((prev) => ({ ...prev, patchOnly: normalizeTri(e.target.value) }))}>
-                                        <option value="all">Patch 全部</option>
-                                        <option value="yes">有 Patch</option>
-                                        <option value="no">无 Patch</option>
-                                    </select>
-                                    <select className="rounded border border-slate-200 bg-white px-2 py-2 text-sm" value={draft.pocOnly} onChange={(e) => setDraft((prev) => ({ ...prev, pocOnly: normalizeTri(e.target.value) }))}>
-                                        <option value="all">PoC 全部</option>
-                                        <option value="yes">有 PoC</option>
-                                        <option value="no">无 PoC</option>
-                                    </select>
-                                </div>
-
-                                <div className="grid grid-cols-2 gap-2">
-                                    <select className="rounded border border-slate-200 bg-white px-2 py-2 text-sm" value={draft.refOnly} onChange={(e) => setDraft((prev) => ({ ...prev, refOnly: normalizeTri(e.target.value) }))}>
-                                        <option value="all">引用 全部</option>
-                                        <option value="yes">有引用</option>
-                                        <option value="no">无引用</option>
-                                    </select>
-                                    <select className="rounded border border-slate-200 bg-white px-2 py-2 text-sm" value={draft.detailOnly} onChange={(e) => setDraft((prev) => ({ ...prev, detailOnly: normalizeTri(e.target.value) }))}>
-                                        <option value="all">详情链接 全部</option>
-                                        <option value="yes">有详情链接</option>
-                                        <option value="no">无详情链接</option>
-                                    </select>
-                                </div>
-
-                                <select className="w-full rounded border border-slate-200 bg-white px-2 py-2 text-sm" value={draft.pocRuleMode} onChange={(e) => setDraft((prev) => ({ ...prev, pocRuleMode: normalizeRule(e.target.value) }))}>
-                                    <option value="balanced">PoC 规则: balanced</option>
-                                    <option value="strict">PoC 规则: strict</option>
-                                    <option value="loose">PoC 规则: loose</option>
-                                </select>
-
-                                {draft.showAdvanced ? (
-                                    <div className="grid gap-2 rounded border border-slate-200 bg-slate-50 p-2">
-                                        <input className="rounded border border-slate-200 bg-white px-2 py-2 text-sm" type="date" value={draft.from} onChange={(e) => setDraft((prev) => ({ ...prev, from: e.target.value }))} />
-                                        <input className="rounded border border-slate-200 bg-white px-2 py-2 text-sm" type="date" value={draft.to} onChange={(e) => setDraft((prev) => ({ ...prev, to: e.target.value }))} />
-                                    </div>
-                                ) : null}
-                            </div>
-
-                            <div className="mt-4 grid grid-cols-2 gap-2">
-                                <button className="rounded border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700" onClick={resetDraftAndApply}>清空</button>
-                                <button className="rounded bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-500" onClick={applyDraft}>{loading ? "Loading..." : "应用筛选"}</button>
-                            </div>
-
-                            {hasUnappliedChanges ? <p className="mt-2 text-[11px] text-amber-700">筛选已修改，点击“应用筛选”后生效。</p> : null}
-                            {error ? <p className="mt-2 text-xs text-rose-600">{error}</p> : null}
-                        </aside>
-
-                        <section className="space-y-3">
-                            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
-                                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
-                                    <span className="rounded-full bg-slate-100 px-2.5 py-1">{filteredRows.length} visible</span>
-                                    <span className="rounded-full bg-slate-100 px-2.5 py-1">高危 {stats.high}</span>
-                                    <span className="rounded-full bg-slate-100 px-2.5 py-1">严重 {stats.critical}</span>
-                                    <span className="rounded-full bg-slate-100 px-2.5 py-1">PoC {stats.poc}</span>
-                                </div>
-                                <PageControls page={page} totalPages={totalPages} pageSize={pageSize} onPage={(p) => void runQuery(p, pageSize)} onPageSize={(size) => void runQuery(1, size)} />
-                            </div>
-
-                            <div className="divide-y divide-slate-200 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_12px_28px_rgba(15,23,42,0.07)]">
-                                {filteredRows.map((item) => {
-                                    const poc = summarizePoc(item, applied.pocRuleMode);
-                                    const severityTone = riskTone(item.severity);
-                                    const cweText = [item.cwe_id || "-", item.cwe_description || "-"].filter(Boolean).join(" | ");
-                                    const cvssText = `score=${scoreText(item.cvss_score)} | vector=${item.cvss_vector || "-"}`;
-                                    return (
-                                        <article key={item.cve_id} className="px-4 py-4">
-                                            <div className="flex flex-wrap items-start gap-2">
-                                                <h3 className="text-sm font-semibold text-slate-950">
-                                                    {item.title || "无标题"}
-                                                    <span className="ml-2 font-mono text-xs text-slate-500">{item.cve_id}</span>
-                                                </h3>
-                                                <span className={`rounded-full px-2 py-0.5 text-[11px] ring-1 ${toneClass(severityTone)}`}>{item.severity || "unknown"}</span>
-                                                <span className={`rounded-full px-2 py-0.5 text-[11px] ring-1 ${toneClass(poc.tone)}`}>{poc.label}</span>
-                                                <div className="ml-auto flex items-center gap-2">
-                                                    <button className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px]" onClick={() => void openDetail(item)}>展开</button>
-                                                    {item.detail_url ? <a className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px]" href={item.detail_url} target="_blank" rel="noreferrer">跳转</a> : null}
-                                                </div>
-                                            </div>
-
-                                            <div className="mt-2 space-y-2 text-sm text-slate-700">
-                                                <SummaryLine text={item.description || "暂无描述"} />
-                                                <div className="grid gap-2 md:grid-cols-2">
-                                                    <LabeledLine label="CWE" text={cweText} />
-                                                    <LabeledLine label="CVSS" text={cvssText} mono />
-                                                </div>
-                                                <div className="grid gap-2 md:grid-cols-2">
-                                                    <LinkLine title="引用链接（原始）" urls={unique(item.references || [])} />
-                                                    <LinkLine title="补丁链接（提取）" urls={unique(item.patch_urls || [])} />
-                                                </div>
-                                            </div>
-                                        </article>
-                                    );
-                                })}
-
-                                {filteredRows.length === 0 ? (
-                                    <div className="px-4 py-12 text-center text-sm text-slate-500">没有匹配结果，调整筛选后再试。</div>
-                                ) : null}
-                            </div>
-
-                            <div className="flex justify-end">
-                                <PageControls page={page} totalPages={totalPages} pageSize={pageSize} onPage={(p) => void runQuery(p, pageSize)} onPageSize={(size) => void runQuery(1, size)} />
-                            </div>
-                        </section>
-                    </div>
+                    <SearchTab
+                        filteredRows={filteredRows}
+                        stats={stats}
+                        page={page}
+                        totalPages={totalPages}
+                        pageSize={pageSize}
+                        applied={applied}
+                        draft={draft}
+                        setDraft={setDraft}
+                        loading={loading}
+                        error={error}
+                        hasUnappliedChanges={hasUnappliedChanges}
+                        resetDraftAndApply={resetDraftAndApply}
+                        applyDraft={applyDraft}
+                        runQuery={(p, size) => void runQuery(p, size)}
+                        openDetail={(item) => void openDetail(item)}
+                        query={query}
+                    />
                 ) : activeTab === "github" ? (
-                    <section className="mt-4 space-y-4">
-                        <div className="flex items-center gap-3">
-                            <h2 className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-600">GitHub 缓存</h2>
-                            <button
-                                className="rounded border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50"
-                                disabled={statsLoading}
-                                onClick={() => void loadGithubStats()}
-                            >
-                                {statsLoading ? "加载中…" : "刷新统计"}
-                            </button>
-                        </div>
-
-                        <div className="grid gap-4 xl:grid-cols-2">
-                            <GithubStatsCard title="依赖图 (SBOM)" stats={depsStats} totalKey="total_packages" totalLabel="包总数" />
-                            <GithubStatsCard title="语言组成" stats={langsStats} totalKey="total_language_rows" totalLabel="语言行数" />
-                        </div>
-
-                        <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
-                            <h3 className="text-sm font-semibold">按包名反查仓库</h3>
-                            <div className="flex flex-wrap gap-2">
-                                <input
-                                    className="min-w-0 flex-1 rounded border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
-                                    placeholder="包名，如 lodash"
-                                    value={pkgName}
-                                    onChange={(e) => setPkgName(e.target.value)}
-                                    onKeyDown={(e) => { if (e.key === "Enter") void searchByPackage(); }}
-                                />
-                                <input
-                                    className="w-36 rounded border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
-                                    placeholder="ecosystem（可选）"
-                                    value={pkgEco}
-                                    onChange={(e) => setPkgEco(e.target.value)}
-                                    onKeyDown={(e) => { if (e.key === "Enter") void searchByPackage(); }}
-                                />
-                                <button
-                                    className="rounded bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
-                                    disabled={pkgLoading}
-                                    onClick={() => void searchByPackage()}
-                                >
-                                    {pkgLoading ? "查询中…" : "查询"}
-                                </button>
-                            </div>
-                            {pkgError && <p className="text-xs text-rose-600">{pkgError}</p>}
-                            {pkgResults !== null && (
-                                pkgResults.length === 0
-                                    ? <p className="text-sm text-slate-500">无结果</p>
-                                    : <div className="overflow-x-auto">
-                                        <table className="w-full text-xs">
-                                            <thead>
-                                                <tr className="border-b border-slate-200 text-left text-slate-500">
-                                                    <th className="pb-2 pr-4 font-medium">仓库</th>
-                                                    <th className="pb-2 pr-4 font-medium">ecosystem</th>
-                                                    <th className="pb-2 pr-4 font-medium">包名</th>
-                                                    <th className="pb-2 pr-4 font-medium">版本</th>
-                                                    <th className="pb-2 pr-4 font-medium">关系</th>
-                                                    <th className="pb-2 font-medium">CVE 数</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody className="divide-y divide-slate-100">
-                                                {pkgResults.map((item, i) => (
-                                                    <tr key={i} className="text-slate-700">
-                                                        <td className="py-1.5 pr-4 font-mono">
-                                                            <a href={`https://github.com/${item.owner}/${item.repo}`} target="_blank" rel="noreferrer" className="text-blue-700 hover:underline">
-                                                                {item.owner}/{item.repo}
-                                                            </a>
-                                                        </td>
-                                                        <td className="py-1.5 pr-4 text-slate-500">{item.ecosystem ?? "-"}</td>
-                                                        <td className="py-1.5 pr-4">{item.package_name}</td>
-                                                        <td className="py-1.5 pr-4 text-slate-500">{item.version_info ?? "-"}</td>
-                                                        <td className="py-1.5 pr-4 text-slate-500">{item.relationship ?? "-"}</td>
-                                                        <td className="py-1.5">{item.source_cves.length}</td>
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                            )}
-                        </div>
-
-                        <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
-                            <h3 className="text-sm font-semibold">按语言反查仓库</h3>
-                            <div className="flex flex-wrap gap-2">
-                                <input
-                                    className="min-w-0 flex-1 rounded border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
-                                    placeholder="语言名，如 Python"
-                                    value={langName}
-                                    onChange={(e) => setLangName(e.target.value)}
-                                    onKeyDown={(e) => { if (e.key === "Enter") void searchByLanguage(); }}
-                                />
-                                <button
-                                    className="rounded bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
-                                    disabled={langLoading}
-                                    onClick={() => void searchByLanguage()}
-                                >
-                                    {langLoading ? "查询中…" : "查询"}
-                                </button>
-                            </div>
-                            {langError && <p className="text-xs text-rose-600">{langError}</p>}
-                            {langResults !== null && (
-                                langResults.length === 0
-                                    ? <p className="text-sm text-slate-500">无结果</p>
-                                    : <div className="overflow-x-auto">
-                                        <table className="w-full text-xs">
-                                            <thead>
-                                                <tr className="border-b border-slate-200 text-left text-slate-500">
-                                                    <th className="pb-2 pr-4 font-medium">仓库</th>
-                                                    <th className="pb-2 pr-4 font-medium">语言</th>
-                                                    <th className="pb-2 pr-4 font-medium">字节数</th>
-                                                    <th className="pb-2 pr-4 font-medium">优先级</th>
-                                                    <th className="pb-2 font-medium">CVE 数</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody className="divide-y divide-slate-100">
-                                                {langResults.map((item, i) => (
-                                                    <tr key={i} className="text-slate-700">
-                                                        <td className="py-1.5 pr-4 font-mono">
-                                                            <a href={`https://github.com/${item.owner}/${item.repo}`} target="_blank" rel="noreferrer" className="text-blue-700 hover:underline">
-                                                                {item.owner}/{item.repo}
-                                                            </a>
-                                                        </td>
-                                                        <td className="py-1.5 pr-4">
-                                                            <span className="flex items-center gap-1">
-                                                                <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: LANG_COLORS[item.language] ?? "#8b949e" }} />
-                                                                {item.language}
-                                                            </span>
-                                                        </td>
-                                                        <td className="py-1.5 pr-4 text-slate-500">{(item.bytes / 1024).toFixed(1)} KB</td>
-                                                        <td className="py-1.5 pr-4 text-slate-500">{item.priority}</td>
-                                                        <td className="py-1.5">{item.source_cves.length}</td>
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                            )}
-                        </div>
-                    </section>
+                    <GithubTab
+                        depsStats={depsStats}
+                        langsStats={langsStats}
+                        statsLoading={statsLoading}
+                        loadGithubStats={() => void loadGithubStats()}
+                        pkgName={pkgName}
+                        setPkgName={setPkgName}
+                        pkgEco={pkgEco}
+                        setPkgEco={setPkgEco}
+                        pkgResults={pkgResults}
+                        pkgLoading={pkgLoading}
+                        pkgError={pkgError}
+                        searchByPackage={() => void searchByPackage()}
+                        langName={langName}
+                        setLangName={setLangName}
+                        langResults={langResults}
+                        langLoading={langLoading}
+                        langError={langError}
+                        searchByLanguage={() => void searchByLanguage()}
+                    />
                 ) : (
-                    <section className="mt-4 space-y-4">
-                        <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
-                            <h2 className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-600">Aliyun Debug</h2>
-                            <p className="mt-1 text-sm text-slate-500">用于补漏、覆盖检查、页重试与排障。</p>
-                        </div>
-
-                        <div className="grid gap-4 xl:grid-cols-3">
-                            <div className="rounded-xl border border-slate-200 bg-white p-4">
-                                <h3 className="text-sm font-semibold">按 CVE 调试</h3>
-                                <div className="mt-3 flex gap-2">
-                                    <input className="min-w-0 flex-1 rounded border border-slate-200 px-2 py-2 text-sm" value={cveId} onChange={(e) => setCveId(e.target.value)} placeholder="CVE-2026-xxxx" />
-                                    <button className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs" onClick={() => void debugLoadByCve()}>查询</button>
-                                </div>
-                            </div>
-
-                            <div className="rounded-xl border border-slate-200 bg-white p-4">
-                                <h3 className="text-sm font-semibold">覆盖检查</h3>
-                                <div className="mt-3 flex gap-2">
-                                    <input className="min-w-0 flex-1 rounded border border-slate-200 px-2 py-2 text-sm" type="number" min={1} value={maxPage} onChange={(e) => setMaxPage(Number(e.target.value || 1))} />
-                                    <button className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs" onClick={() => void debugLoadGaps()}>gaps</button>
-                                    <button className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs" onClick={() => void debugLoadCheckpoints()}>checkpoints</button>
-                                </div>
-                            </div>
-
-                            <div className="rounded-xl border border-slate-200 bg-white p-4">
-                                <h3 className="text-sm font-semibold">页重试</h3>
-                                <div className="mt-3 flex gap-2">
-                                    <input className="min-w-0 flex-1 rounded border border-slate-200 px-2 py-2 text-sm" value={retryPages} onChange={(e) => setRetryPages(e.target.value)} placeholder="50 51 52" />
-                                    <button className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs" onClick={() => void debugRetryPages()}>retry</button>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="grid gap-4 xl:grid-cols-3">
-                            <DebugBlock title="Gaps" text={gaps ? JSON.stringify(gaps, null, 2) : "暂无 gaps 数据"} />
-                            <DebugBlock title="Checkpoints" text={checkpoints ? JSON.stringify(checkpoints, null, 2) : "暂无 checkpoints 数据"} />
-                            <DebugBlock title="Retry 结果" text={retryResult} />
-                        </div>
-                    </section>
+                    <DebugTab
+                        cveId={cveId}
+                        setCveId={setCveId}
+                        maxPage={maxPage}
+                        setMaxPage={setMaxPage}
+                        retryPages={retryPages}
+                        setRetryPages={setRetryPages}
+                        retryResult={retryResult}
+                        gaps={gaps}
+                        checkpoints={checkpoints}
+                        debugLoadByCve={() => void debugLoadByCve()}
+                        debugLoadGaps={() => void debugLoadGaps()}
+                        debugLoadCheckpoints={() => void debugLoadCheckpoints()}
+                        debugRetryPages={() => void debugRetryPages()}
+                    />
                 )}
             </main>
 
@@ -989,317 +472,6 @@ export default function Home() {
                     </aside>
                 </div>
             ) : null}
-        </div>
-    );
-}
-
-function TabButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
-    return (
-        <button className={`rounded border px-3 py-1.5 text-xs font-medium ${active ? "border-blue-300 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-600"}`} onClick={onClick}>
-            {label}
-        </button>
-    );
-}
-
-function PageControls({
-    page,
-    totalPages,
-    pageSize,
-    onPage,
-    onPageSize,
-}: {
-    page: number;
-    totalPages: number;
-    pageSize: number;
-    onPage: (page: number) => void;
-    onPageSize: (size: number) => void;
-}) {
-    const [pageInput, setPageInput] = useState(String(page));
-
-    useEffect(() => {
-        setPageInput(String(page));
-    }, [page]);
-
-    function jumpToPage(): void {
-        const parsed = Number(pageInput);
-        if (!Number.isInteger(parsed)) return;
-        onPage(Math.min(totalPages, Math.max(1, parsed)));
-    }
-
-    return (
-        <div className="flex flex-wrap items-center gap-2">
-            <button className="rounded border border-slate-200 bg-white px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50" disabled={page <= 1} onClick={() => onPage(Math.max(1, page - 1))}>上一页</button>
-            <button className="rounded border border-slate-200 bg-white px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50" disabled={page >= totalPages} onClick={() => onPage(Math.min(totalPages, page + 1))}>下一页</button>
-            <label className="flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600">
-                <span>跳到</span>
-                <input
-                    className="w-16 border-0 bg-transparent p-0 text-center text-xs outline-none"
-                    inputMode="numeric"
-                    min={1}
-                    max={totalPages}
-                    type="number"
-                    value={pageInput}
-                    onChange={(e) => setPageInput(e.target.value)}
-                    onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                            jumpToPage();
-                        }
-                    }}
-                />
-                <span>/ {totalPages}</span>
-            </label>
-            <button className="rounded border border-slate-200 bg-white px-2 py-1 text-xs" onClick={jumpToPage}>前往</button>
-            <select className="rounded border border-slate-200 bg-white px-2 py-1 text-xs" value={pageSize} onChange={(e) => onPageSize(Number(e.target.value))}>
-                <option value={10}>10/页</option>
-                <option value={20}>20/页</option>
-                <option value={50}>50/页</option>
-                <option value={100}>100/页</option>
-            </select>
-        </div>
-    );
-}
-
-function SummaryLine({ text }: { text: string }) {
-    const [expanded, setExpanded] = useState(false);
-    const canExpand = text.length > 140;
-    return (
-        <div className="flex items-end gap-1 text-sm text-slate-600">
-            <span className={`min-w-0 flex-1 leading-6 ${expanded ? "" : "line-clamp-2"}`}>{text}</span>
-            {canExpand ? <button className="shrink-0 text-xs text-blue-600" onClick={() => setExpanded((v) => !v)}>{expanded ? "收起" : "展开"}</button> : null}
-        </div>
-    );
-}
-
-function LabeledLine({ label, text, mono = false }: { label: string; text: string; mono?: boolean }) {
-    return (
-        <p className="text-sm leading-6 text-slate-700">
-            <strong className="font-semibold text-slate-900">{label}: </strong>
-            <span className={mono ? "font-mono text-[13px]" : ""}>{text || "-"}</span>
-        </p>
-    );
-}
-
-function LinkLine({ title, urls }: { title: string; urls: string[] }) {
-    const [expanded, setExpanded] = useState(false);
-    const canExpand = urls.length > 4;
-    return (
-        <div>
-            <div className="text-xs uppercase tracking-widest text-slate-500">{title}</div>
-            {urls.length ? (
-                <div className="mt-1 flex items-end gap-1">
-                    <div className={`min-w-0 flex-1 text-xs leading-5 text-slate-700 ${expanded ? "" : "line-clamp-2"}`}>
-                        {urls.map((url, index) => (
-                            <span key={url}>
-                                <a href={url} target="_blank" rel="noreferrer" className="underline decoration-slate-300 underline-offset-2 hover:text-blue-700" title={url}>
-                                    {trimUrl(url)}
-                                </a>
-                                {index < urls.length - 1 ? <span className="mx-1 text-slate-400">·</span> : null}
-                            </span>
-                        ))}
-                    </div>
-                    {canExpand ? <button className="shrink-0 text-xs text-blue-600" onClick={() => setExpanded((v) => !v)}>{expanded ? "收起" : "展开"}</button> : null}
-                </div>
-            ) : (
-                <p className="text-xs text-slate-500">-</p>
-            )}
-        </div>
-    );
-}
-
-function CollapsibleText({ label, text, lines = 2 }: { label: string; text: string; lines?: number }) {
-    const [expanded, setExpanded] = useState(false);
-    const clampClass = lines === 1 ? "line-clamp-1" : lines === 2 ? "line-clamp-2" : "line-clamp-3";
-    const canExpand = text.length > (lines === 1 ? 80 : lines === 2 ? 140 : 220);
-    return (
-        <div className="text-sm leading-6 text-slate-700">
-            <div className="flex items-end gap-1">
-                <strong className="font-semibold text-slate-900">{label}: </strong>
-                <span className={`min-w-0 flex-1 ${expanded ? "" : clampClass}`}>{text}</span>
-                {canExpand ? <button className="shrink-0 text-xs text-blue-600" onClick={() => setExpanded((v) => !v)}>{expanded ? "收起" : "展开"}</button> : null}
-            </div>
-        </div>
-    );
-}
-
-function DebugBlock({ title, text }: { title: string; text: string }) {
-    return (
-        <div className="rounded-xl border border-slate-200 bg-white p-4">
-            <h3 className="text-sm font-semibold">{title}</h3>
-            <pre className="mt-3 max-h-72 overflow-auto rounded border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">{text}</pre>
-        </div>
-    );
-}
-
-function LanguageBar({ languages }: { languages: LangEntry[] }) {
-    if (!languages.length) return null;
-    return (
-        <div>
-            <div className="flex h-2 w-full overflow-hidden rounded-full">
-                {languages.map((l) => (
-                    <div
-                        key={l.language}
-                        style={{ width: `${l.percent}%`, backgroundColor: LANG_COLORS[l.language] ?? "#8b949e" }}
-                        title={`${l.language}: ${l.percent}%`}
-                    />
-                ))}
-            </div>
-            <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
-                {languages.slice(0, 8).map((l) => (
-                    <span key={l.language} className="flex items-center gap-1 text-[11px] text-slate-600">
-                        <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: LANG_COLORS[l.language] ?? "#8b949e" }} />
-                        {l.language}
-                        <span className="text-slate-400">{l.percent}%</span>
-                    </span>
-                ))}
-            </div>
-        </div>
-    );
-}
-
-function GitHubRepoCard({ repoKey, data }: { repoKey: string; data: RepoGithubData }) {
-    const [pkgsExpanded, setPkgsExpanded] = useState(false);
-    const [owner, repo] = repoKey.split("/");
-    const langs = data.langs?.status === "fetched" ? (data.langs.languages ?? []) : [];
-    const pkgs = data.deps?.status === "fetched" ? (data.deps.packages ?? []) : [];
-    const pkgCount = data.deps?.package_count ?? pkgs.length;
-
-    const ecosystems = Array.from(new Set(pkgs.map((p) => p.ecosystem ?? "other"))).sort();
-    const pkgsByEco: Record<string, PkgEntry[]> = {};
-    for (const p of pkgs) {
-        const eco = p.ecosystem ?? "other";
-        (pkgsByEco[eco] ??= []).push(p);
-    }
-
-    return (
-        <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 text-sm">
-            <div className="flex items-center justify-between gap-2">
-                <a
-                    href={`https://github.com/${owner}/${repo}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="font-mono text-xs font-semibold text-blue-700 hover:underline"
-                >
-                    {owner}/{repo}
-                </a>
-                {data.loading && <span className="text-[11px] text-slate-400">加载中…</span>}
-                {!data.loading && data.langs?.status && data.langs.status !== "fetched" && (
-                    <span className="text-[11px] text-slate-400">{data.langs.status}</span>
-                )}
-            </div>
-
-            {langs.length > 0 && (
-                <div className="mt-2">
-                    <LanguageBar languages={langs} />
-                </div>
-            )}
-
-            {pkgCount > 0 && (
-                <div className="mt-2">
-                    <button
-                        className="flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-700"
-                        onClick={() => setPkgsExpanded((v) => !v)}
-                    >
-                        <span>{pkgsExpanded ? "▾" : "▸"}</span>
-                        <span>{pkgCount} 个依赖包</span>
-                    </button>
-                    {pkgsExpanded && (
-                        <div className="mt-2 space-y-2">
-                            {ecosystems.map((eco) => (
-                                <div key={eco}>
-                                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{eco}</div>
-                                    <div className="mt-1 flex flex-wrap gap-1">
-                                        {(pkgsByEco[eco] ?? []).map((p, i) => (
-                                            <span
-                                                key={i}
-                                                className="rounded bg-white px-1.5 py-0.5 text-[11px] text-slate-700 ring-1 ring-slate-200"
-                                                title={p.version_info ?? undefined}
-                                            >
-                                                {p.package_name}
-                                                {p.version_info ? <span className="ml-1 text-slate-400">{p.version_info}</span> : null}
-                                            </span>
-                                        ))}
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </div>
-            )}
-
-            {!data.loading && pkgCount === 0 && langs.length === 0 && data.deps?.status && (
-                <p className="mt-1 text-[11px] text-slate-400">
-                    deps: {data.deps.status}{data.langs?.status ? ` · langs: ${data.langs.status}` : ""}
-                </p>
-            )}
-        </div>
-    );
-}
-
-const STATUS_ORDER = ["fetched", "not_modified", "pending", "error", "skip_404", "skip_403"];
-
-function GithubStatsCard({
-    title,
-    stats,
-    totalKey,
-    totalLabel,
-}: {
-    title: string;
-    stats: Record<string, number> | null;
-    totalKey: string;
-    totalLabel: string;
-}) {
-    if (!stats) {
-        return (
-            <div className="rounded-xl border border-slate-200 bg-white p-4">
-                <h3 className="text-sm font-semibold">{title}</h3>
-                <p className="mt-3 text-xs text-slate-400">暂无数据，点击"刷新统计"加载。</p>
-            </div>
-        );
-    }
-
-    const statusEntries = STATUS_ORDER
-        .filter((s) => s in stats)
-        .map((s) => [s, stats[s]] as [string, number]);
-    const otherEntries = Object.entries(stats).filter(
-        ([k]) => !STATUS_ORDER.includes(k) && k !== totalKey && k !== "pending_by_priority"
-    );
-    const total = statusEntries.reduce((acc, [, v]) => acc + v, 0);
-
-    const statusColor: Record<string, string> = {
-        fetched: "text-emerald-700 bg-emerald-50",
-        not_modified: "text-sky-700 bg-sky-50",
-        pending: "text-amber-700 bg-amber-50",
-        error: "text-rose-700 bg-rose-50",
-        skip_404: "text-slate-500 bg-slate-100",
-        skip_403: "text-slate-500 bg-slate-100",
-    };
-
-    return (
-        <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
-            <div className="flex items-baseline justify-between">
-                <h3 className="text-sm font-semibold">{title}</h3>
-                <span className="text-xs text-slate-500">{total} 仓库</span>
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-                {statusEntries.map(([status, count]) => (
-                    <span key={status} className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${statusColor[status] ?? "text-slate-600 bg-slate-100"}`}>
-                        {status}: {count}
-                    </span>
-                ))}
-            </div>
-
-            {stats[totalKey] !== undefined && (
-                <p className="text-xs text-slate-500">{totalLabel}: {stats[totalKey].toLocaleString()}</p>
-            )}
-
-            {otherEntries.length > 0 && (
-                <div className="text-xs text-slate-500 space-y-0.5">
-                    {otherEntries.map(([k, v]) => (
-                        <div key={k}>{k}: {String(v)}</div>
-                    ))}
-                </div>
-            )}
         </div>
     );
 }
