@@ -86,6 +86,52 @@ class GitHubClient:
             return resp.json()
         raise RuntimeError(f"GitHub API request failed after retries: {url}")
 
+    def get_with_meta(
+        self,
+        path: str,
+        *,
+        params: Optional[dict] = None,
+        headers: Optional[dict] = None,
+        accept_statuses: tuple[int, ...] = (200, 304, 404, 403),
+    ) -> tuple[int, dict | list | None, dict[str, str]]:
+        """GET that returns ``(status_code, parsed_body_or_none, response_headers)``.
+
+        Unlike :meth:`get`, this does not raise on the statuses listed in
+        *accept_statuses* — callers can inspect ``304`` for conditional GET,
+        ``404`` for missing resources, and ``403`` for private/disabled
+        endpoints (rate-limit ``403`` responses are still retried internally).
+        """
+        url = path if path.startswith("http") else f"{_GITHUB_API}/{path.lstrip('/')}"
+        merged_headers = dict(headers or {})
+        for attempt in range(4):
+            resp = self._client.get(url, params=params, headers=merged_headers)
+            if resp.status_code == 429 or (
+                resp.status_code == 403 and "rate limit" in resp.text.lower()
+            ):
+                reset = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
+                wait = max(1, reset - int(time.time()))
+                logger.warning(
+                    "GitHub rate-limited; sleeping %ds (attempt %d)", wait, attempt + 1
+                )
+                time.sleep(wait)
+                continue
+            if resp.status_code in accept_statuses:
+                body: dict | list | None
+                if resp.status_code in (200, 201) and resp.content:
+                    try:
+                        body = resp.json()
+                    except ValueError:
+                        body = None
+                else:
+                    body = None
+                return resp.status_code, body, dict(resp.headers)
+            resp.raise_for_status()
+            try:
+                return resp.status_code, resp.json(), dict(resp.headers)
+            except ValueError:
+                return resp.status_code, None, dict(resp.headers)
+        raise RuntimeError(f"GitHub API request failed after retries: {url}")
+
     def get_paged(self, path: str, params: Optional[dict] = None) -> list[dict]:
         """Fetch all pages for a paginated GitHub API endpoint."""
         params = dict(params or {})

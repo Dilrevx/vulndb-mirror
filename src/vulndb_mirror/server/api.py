@@ -5,6 +5,10 @@ from typing import Any, Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from vulndb_mirror.storage.github_sbom_ingest_service import (
+    GithubSbomIngestService,
+)
+from vulndb_mirror.storage.github_sbom_repository import GitHubSbomRepository
 from vulndb_mirror.storage.ingest_service import RawIngestService
 from vulndb_mirror.storage.raw_models import RetryRequest
 from vulndb_mirror.storage.repositories import RawRepository
@@ -13,6 +17,9 @@ from vulndb_mirror.storage.repositories import RawRepository
 def create_app(
     repositories: dict[str, RawRepository],
     services: dict[str, Any],
+    *,
+    sbom_repo: Optional[GitHubSbomRepository] = None,
+    sbom_service: Optional[GithubSbomIngestService] = None,
 ) -> FastAPI:
     channel_names = list(repositories.keys())
 
@@ -128,5 +135,73 @@ def create_app(
             ],
             "meta": repo.get_meta().model_dump(),
         }
+
+    # ---- GitHub SBOM cache ---------------------------------------------
+
+    def _require_sbom_repo() -> GitHubSbomRepository:
+        if sbom_repo is None:
+            raise HTTPException(
+                status_code=503, detail="github-deps not configured"
+            )
+        return sbom_repo
+
+    def _require_sbom_service() -> GithubSbomIngestService:
+        if sbom_service is None:
+            raise HTTPException(
+                status_code=503, detail="github-deps not configured"
+            )
+        return sbom_service
+
+    @app.get("/github-deps/stats")
+    def github_deps_stats():
+        return _require_sbom_repo().stats()
+
+    @app.get("/github-deps/by-package")
+    def github_deps_by_package(
+        name: str = Query(..., min_length=1),
+        ecosystem: Optional[str] = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+    ):
+        return {
+            "items": _require_sbom_repo().query_by_package(
+                ecosystem=ecosystem, name=name, limit=limit
+            )
+        }
+
+    @app.get("/github-deps/{owner}/{repo}")
+    def github_deps_by_repo(owner: str, repo: str):
+        item = _require_sbom_repo().query_by_repo(owner.lower(), repo.lower())
+        if item is None:
+            raise HTTPException(status_code=404, detail="not found")
+        return item
+
+    @app.post("/ops/github-deps/discover")
+    def ops_github_deps_discover(
+        channel: str = Query(default="cvelistv5"),
+        since_iso: Optional[str] = Query(default=None),
+        limit: Optional[int] = Query(default=None, ge=1),
+    ):
+        svc = _require_sbom_service()
+        if channel not in repositories:
+            raise HTTPException(status_code=400, detail=f"unknown channel: {channel}")
+        # Re-bind raw_repo so discover scans the requested channel.
+        svc.raw_repo = repositories[channel]
+        result = svc.discover_from_recent(
+            channel=channel, since_iso=since_iso, limit=limit
+        )
+        return result.model_dump()
+
+    @app.post("/ops/github-deps/sync")
+    def ops_github_deps_sync(
+        max_repos: int = Query(default=200, ge=1),
+        max_seconds: int = Query(default=300, ge=1),
+        priority: Optional[int] = Query(default=None, ge=0, le=1),
+    ):
+        result = _require_sbom_service().run_worker(
+            max_repos=max_repos,
+            max_seconds=max_seconds,
+            priority=priority,
+        )
+        return result.model_dump()
 
     return app

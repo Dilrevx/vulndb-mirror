@@ -372,6 +372,7 @@ class SqliteRawRepository(RawRepository):
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.sqlite_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
     def _init_db(self) -> None:
@@ -401,9 +402,71 @@ class SqliteRawRepository(RawRepository):
                 )
                 """
             )
+            self._init_github_sbom_tables(conn)
             self._search_index_enabled = self._ensure_search_index(conn)
             conn.commit()
         self._refresh_page_tracking_if_stale()
+
+    def _init_github_sbom_tables(self, conn: sqlite3.Connection) -> None:
+        """Bootstrap the GitHub SBOM cache tables.
+
+        Owned by :class:`~vulndb_mirror.storage.github_sbom_repository.GitHubSbomRepository`
+        but bootstrapped here so any SqliteRawRepository connection guarantees they exist.
+        """
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS github_sbom_cache (
+                owner          TEXT NOT NULL,
+                repo           TEXT NOT NULL,
+                status         TEXT NOT NULL DEFAULT 'pending',
+                priority       INTEGER NOT NULL DEFAULT 1,
+                http_status    INTEGER,
+                error_message  TEXT,
+                sbom_payload   TEXT,
+                sbom_etag      TEXT,
+                package_count  INTEGER NOT NULL DEFAULT 0,
+                source_cves    TEXT NOT NULL DEFAULT '[]',
+                enqueued_at    TEXT NOT NULL,
+                fetched_at     TEXT,
+                expires_at     TEXT,
+                updated_at     TEXT NOT NULL,
+                PRIMARY KEY (owner, repo)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sbom_cache_queue "
+            "ON github_sbom_cache(status, priority, enqueued_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sbom_cache_expires "
+            "ON github_sbom_cache(expires_at)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS github_sbom_packages (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner          TEXT NOT NULL,
+                repo           TEXT NOT NULL,
+                manifest_path  TEXT,
+                ecosystem      TEXT,
+                package_name   TEXT NOT NULL,
+                version_info   TEXT,
+                purl           TEXT,
+                relationship   TEXT,
+                FOREIGN KEY (owner, repo)
+                    REFERENCES github_sbom_cache(owner, repo) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sbom_pkg_repo "
+            "ON github_sbom_packages(owner, repo)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sbom_pkg_lookup "
+            "ON github_sbom_packages(ecosystem, package_name)"
+        )
 
     def _ensure_search_index(self, conn: sqlite3.Connection) -> bool:
         try:

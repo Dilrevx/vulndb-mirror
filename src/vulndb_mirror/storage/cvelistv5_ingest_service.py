@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from pydantic import BaseModel, Field
 
@@ -33,19 +33,29 @@ class CvelistV5SyncResult(BaseModel):
     already_up_to_date: bool = False
     error: Optional[str] = None
     synced_at: str = Field(default_factory=now_iso)
+    last_sync_iso: Optional[str] = None
 
 
 class CvelistV5IngestService:
     """Sync the CVEProject/cvelistV5 repo and ingest CVE entries."""
 
-    def __init__(self, config: CrawlConfig, repository: RawRepository) -> None:
+    def __init__(
+        self,
+        config: CrawlConfig,
+        repository: RawRepository,
+        *,
+        on_sync_complete: Optional[
+            Callable[["CvelistV5SyncResult"], None]
+        ] = None,
+    ) -> None:
         self.config = config
         self.repository = repository
         self._crawler = CvelistV5Crawler(config)
         self._state_path = Path(config.data_dir) / _STATE_FILE
+        self._on_sync_complete = on_sync_complete
 
     def sync(self, *, full: bool = False) -> CvelistV5SyncResult:
-        prev_commit, _ = self._load_state()
+        prev_commit, prev_sync_iso = self._load_state()
         since_commit = None if (full or prev_commit is None) else prev_commit
 
         logger.info(
@@ -62,11 +72,14 @@ class CvelistV5IngestService:
 
         if since_commit and since_commit == new_commit:
             logger.info("Already up-to-date at commit %s", new_commit)
-            return CvelistV5SyncResult(
+            result = CvelistV5SyncResult(
                 commit=new_commit,
                 previous_commit=prev_commit,
                 already_up_to_date=True,
+                last_sync_iso=prev_sync_iso,
             )
+            self._fire_hook(result)
+            return result
 
         since_year: Optional[int] = None
         if self.config.since:
@@ -85,17 +98,30 @@ class CvelistV5IngestService:
             if saved % 5000 == 0:
                 logger.info("Ingested %d entries…", saved)
 
-        self._save_state(new_commit, now_iso())
+        synced_at = now_iso()
+        self._save_state(new_commit, synced_at)
         logger.info(
             "cvelistV5 sync complete: %d entries saved (commit=%s)",
             saved, new_commit,
         )
 
-        return CvelistV5SyncResult(
+        result = CvelistV5SyncResult(
             saved_entries=saved,
             commit=new_commit,
             previous_commit=prev_commit,
+            synced_at=synced_at,
+            last_sync_iso=prev_sync_iso,
         )
+        self._fire_hook(result)
+        return result
+
+    def _fire_hook(self, result: CvelistV5SyncResult) -> None:
+        if self._on_sync_complete is None:
+            return
+        try:
+            self._on_sync_complete(result)
+        except Exception as exc:
+            logger.warning("cvelistV5 on_sync_complete hook failed: %s", exc)
 
     # ------------------------------------------------------------------
     # State helpers

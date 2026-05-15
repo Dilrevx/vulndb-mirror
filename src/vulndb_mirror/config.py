@@ -188,6 +188,42 @@ class CrawlerSettings(BaseSettings):
         description="Data directory for the cvelistv5 channel",
     )
 
+    # GitHub SBOM (Dependency Graph) cache settings
+    github_sbom_sqlite_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "SQLite file holding the SBOM cache. Defaults to the cvelistv5 "
+            "channel raw.db so cross-channel discoveries share one cache."
+        ),
+    )
+    github_sbom_ttl_days: int = Field(
+        default=7,
+        description="Days a cached SBOM stays fresh before refetch is eligible",
+    )
+    github_sbom_concurrency: int = Field(
+        default=4,
+        description="Worker thread count for parallel SBOM fetches",
+    )
+    github_sbom_hourly_budget: int = Field(
+        default=4500,
+        description=(
+            "Per-process hourly request cap (leaves headroom under the "
+            "5000/h authenticated REST quota)"
+        ),
+    )
+    github_sbom_auto_worker: bool = Field(
+        default=False,
+        description="Run a bounded SBOM worker right after each CVE channel sync",
+    )
+    github_sbom_auto_worker_max_repos: int = Field(
+        default=100,
+        description="Max repos processed by the auto-trigger worker per sync",
+    )
+    github_sbom_auto_worker_max_seconds: int = Field(
+        default=60,
+        description="Max wall-clock seconds the auto-trigger worker is allowed to run",
+    )
+
     # Logging
     log_dir: Optional[str] = Field(
         default="./logs",

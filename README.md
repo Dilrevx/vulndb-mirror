@@ -1,21 +1,17 @@
 # vulndb-mirror
 
-精简后的漏洞镜像库，保留两个独立 Python 包：
+漏洞镜像库，包含两个独立 Python 包：
 
 - `vulndb_mirror`: 镜像抓取 + storage + server + CLI
 - `logic_vulns`: 分析逻辑（`filter` + `tracer`）
 
-支持两个数据 channel：
+支持三个数据 channel：
 
 | Channel | 数据源 | 特点 |
 |---------|--------|------|
 | `aliyun`（默认）| [avd.aliyun.com](https://avd.aliyun.com) | 含 CVSS / CWE / severity，需 Playwright |
 | `trickest_cve` | [trickest/cve](https://github.com/trickest/cve) Git 仓库 | 含 PoC/GitHub 引用，通过 git clone/pull 同步 |
-
-历史重构中已移除：
-
-- `vulndb_channels`
-- starter template（`templates/vulndb-mirror-starter`）
+| `cvelistv5` | [CVEProject/cvelistV5](https://github.com/CVEProject/cvelistV5) Git 仓库 | 官方 CVE JSON 5.0，含 patch/reference URL |
 
 ## 快速安装
 
@@ -60,70 +56,125 @@ uv run vulndb-mirror crawl --channel trickest_cve
 uv run vulndb-mirror crawl --channel trickest_cve --full
 ```
 
-数据写入 `./output/trickest_cve/`，与 aliyun 数据完全隔离。
+数据写入 `./output/trickest_cve/`。
 
-常用环境变量（可写入 `.env`）：
+### cvelistV5 channel
+
+```bash
+# 首次同步（clone 仓库 + 全量导入）
+uv run vulndb-mirror crawl --channel cvelistv5
+
+# 增量同步
+uv run vulndb-mirror crawl --channel cvelistv5
+
+# 强制全量重导入
+uv run vulndb-mirror crawl --channel cvelistv5 --full
+```
+
+数据写入 `./output/cvelistv5/`。
+
+### GitHub 依赖图缓存（github-deps）
+
+对 CVE 引用的 GitHub 仓库调用 GitHub Dependency Graph API，将 SBOM 依赖清单缓存到本地，支持正向查询（某仓库依赖了哪些库）和反向查询（哪些 CVE 间接影响某个包）。
+
+需要设置 `GITHUB_TOKEN`（Personal Access Token，5000 req/h）。
+
+```bash
+# 1. 从 CVE 数据中提取 GitHub 仓库并入队
+uv run vulndb-mirror github-deps discover --channel cvelistv5
+
+# 只扫描最近 7 天更新的 CVE
+uv run vulndb-mirror github-deps discover --channel cvelistv5 --since-days 7
+
+# 2. 拉取队列中的 SBOM 数据（受 hourly budget 控制）
+uv run vulndb-mirror github-deps sync --max-repos 200 --max-seconds 300
+
+# 只处理高优先级（patch_url 中的仓库）
+uv run vulndb-mirror github-deps sync --max-repos 100 --priority 0
+
+# 3. 查看缓存统计
+uv run vulndb-mirror github-deps stats
+```
+
+优先级说明：
+- `priority=0`：出现在 `patch_urls` 中的仓库（高价值，优先处理）
+- `priority=1`：仅出现在 `references` 中的仓库
+
+`crawl --channel cvelistv5/trickest_cve` 同步完成后会自动触发 `discover`。若需同步后也自动跑 worker，设置 `GITHUB_SBOM_AUTO_WORKER=true`。
+
+## 环境变量
+
+常用配置（写入 `.env`）：
 
 ```env
 # 通用
-CHANNEL=aliyun          # 默认 channel，可改为 trickest_cve
+CHANNEL=aliyun          # 默认 channel
 SYNC_MODE=hybrid
 HEAD_SKIP_OK_PAGES=true
 HEAD_RECHECK_PAGES=10
+
+# GitHub API（github-deps 必须）
+GITHUB_TOKEN=ghp_...
 
 # trickest channel
 TRICKEST_DATA_DIR=./output/trickest_cve
 GIT_CLONE_VIA_SSH=false          # 改为 true 以使用 git@github.com SSH 协议
 GIT_PROXY=socks5://127.0.0.1:1080  # 可选，git 操作代理
-```
 
-如果默认端口 `8787` 被占用：
+# cvelistv5 channel
+CVELISTV5_DATA_DIR=./output/cvelistv5
 
-```bash
-RAWDB_API_PORT=8791 uv run vulndb-mirror api
+# GitHub SBOM 缓存
+GITHUB_SBOM_TTL_DAYS=7                    # 缓存有效期（天）
+GITHUB_SBOM_CONCURRENCY=4                 # 并发线程数
+GITHUB_SBOM_HOURLY_BUDGET=4500            # 每小时最大请求数（留 500 给其他调用）
+GITHUB_SBOM_AUTO_WORKER=false             # crawl 后自动跑 worker
+GITHUB_SBOM_AUTO_WORKER_MAX_REPOS=100     # auto worker 单次最多处理仓库数
+GITHUB_SBOM_AUTO_WORKER_MAX_SECONDS=60    # auto worker 最长运行秒数
+GITHUB_SBOM_SQLITE_PATH=                  # 留空则使用 cvelistv5 的 raw.db
+
+# API 服务
+RAWDB_API_HOST=127.0.0.1
+RAWDB_API_PORT=8787
 ```
 
 ## FastAPI
 
-- `GET /health`
-- `GET /raw/{cve_id}`
-- `GET /raw`
-- `GET /pages/checkpoints`
-- `GET /pages/gaps`
-- `POST /pages/retry`
-- `POST /crawl/resume`
-
-## 快速拷贝到其他项目
-
-仅需拷贝：
-
-- `src/vulndb_mirror/`
-- `src/logic_vulns/`
-
-以及在目标项目安装依赖：
+启动：
 
 ```bash
-uv add fastapi uvicorn pydantic pydantic-settings httpx[socks] playwright playwright-stealth beautifulsoup4 pyyaml
-uv run playwright install chromium
+uv run vulndb-mirror api
+# 或指定端口
+RAWDB_API_PORT=8791 uv run vulndb-mirror api
 ```
 
-API 启动示例：
+### 通用路由
 
-```python
-from vulndb_mirror.config import CrawlerSettings
-from vulndb_mirror.server.api import create_app
-from vulndb_mirror.storage.ingest_service import RawIngestService
-from vulndb_mirror.storage.repository_factory import build_raw_repository
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/health` | 健康检查 |
+| `GET` | `/channels` | 已配置的 channel 列表 |
+| `GET` | `/raw/{cve_id}` | 查询单条 CVE（`?channel=cvelistv5`） |
+| `GET` | `/raw` | 分页查询（`q`, `modified_from`, `has_patch`, `page`, `page_size`, `channel`） |
 
-settings = CrawlerSettings()
-repository = build_raw_repository(settings)
-service = RawIngestService(settings.to_crawl_config(), repository)
-app = create_app(repository, service)
-```
+### 运维路由
 
-```bash
-uvicorn your_module:app --host 0.0.0.0 --port 8787
-```
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/ops/sync` | 触发增量同步（`?channel=`） |
+| `POST` | `/ops/aliyun/retry` | 重试指定页（aliyun） |
+| `GET` | `/ops/aliyun/checkpoints` | 查看 checkpoint 状态 |
+| `GET` | `/ops/aliyun/gaps` | 查看缺失页段 |
+| `POST` | `/ops/github-deps/discover` | 从 CVE 数据提取仓库入队（`?channel=&since_iso=&limit=`） |
+| `POST` | `/ops/github-deps/sync` | 拉取 SBOM 队列（`?max_repos=&max_seconds=&priority=`） |
+
+### GitHub 依赖图路由
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/github-deps/stats` | 缓存统计（状态分布、包总数） |
+| `GET` | `/github-deps/{owner}/{repo}` | 查询某仓库的 SBOM 缓存及依赖包列表 |
+| `GET` | `/github-deps/by-package` | 反查：哪些仓库依赖了某个包（`?name=lodash&ecosystem=npm`） |
 
 ## Web 前端
 
