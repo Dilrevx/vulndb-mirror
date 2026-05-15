@@ -3,6 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import signal
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -78,6 +81,45 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("gaps", help="show missing/failed page segments (aliyun channel)")
     sub.add_parser("api", help="start FastAPI service")
+
+    sync = sub.add_parser(
+        "sync",
+        help="timed loop: crawl CVE data → github-deps → github-languages (suitable for tmux)",
+    )
+    sync.add_argument(
+        "--channel",
+        nargs="+",
+        default=["cvelistv5"],
+        choices=["cvelistv5", "trickest_cve", "aliyun"],
+        help="channels to crawl and scan for GitHub repos (default: cvelistv5)",
+    )
+    sync.add_argument(
+        "--interval",
+        type=int,
+        default=3600,
+        metavar="SECONDS",
+        help="seconds between full sync cycles (default: 3600)",
+    )
+    sync.add_argument(
+        "--patch-only",
+        action="store_true",
+        default=False,
+        help="GitHub cache: only process priority-0 repos (from patch_urls)",
+    )
+    sync.add_argument(
+        "--github-max-repos",
+        type=int,
+        default=500,
+        metavar="N",
+        help="max repos per GitHub worker run per cycle (default: 500)",
+    )
+    sync.add_argument(
+        "--github-max-seconds",
+        type=int,
+        default=1800,
+        metavar="SECONDS",
+        help="max seconds per GitHub worker run per cycle (default: 1800)",
+    )
 
     deps = sub.add_parser(
         "github-deps",
@@ -389,6 +431,106 @@ def main() -> None:
             print(json.dumps(langs_service.languages_repo.stats(), ensure_ascii=False, indent=2))
             return
 
+        return
+
+    # --- Sync loop -----------------------------------------------------------
+    if args.command == "sync":
+        channels: list[str] = args.channel
+        interval: int = args.interval
+        priority = 0 if args.patch_only else None
+        github_max_repos: int = args.github_max_repos
+        github_max_seconds: int = args.github_max_seconds
+
+        raw_repos: dict[str, object] = {}
+        for ch in channels:
+            if ch == "trickest_cve":
+                raw_repos[ch] = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
+            elif ch == "cvelistv5":
+                raw_repos[ch] = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
+            else:
+                raw_repos[ch] = build_raw_repository(settings)
+
+        primary_channel = "cvelistv5" if "cvelistv5" in channels else channels[0]
+        sbom_service = _build_sbom_service(settings, raw_repos[primary_channel], channel=primary_channel)
+        langs_service = _build_languages_service(settings, raw_repos[primary_channel], channel=primary_channel)
+
+        stop = threading.Event()
+
+        def _on_signal(sig: int, _frame: object) -> None:
+            logging.getLogger(__name__).info(
+                "sync: signal %d received, stopping after current phase", sig
+            )
+            stop.set()
+
+        signal.signal(signal.SIGINT, _on_signal)
+        signal.signal(signal.SIGTERM, _on_signal)
+
+        logger = logging.getLogger(__name__)
+        logger.info(
+            "sync service started: channels=%s interval=%ds patch_only=%s "
+            "github_max_repos=%d github_max_seconds=%d",
+            channels, interval, args.patch_only, github_max_repos, github_max_seconds,
+        )
+
+        while not stop.is_set():
+            cycle_start = time.time()
+
+            # Phase 1: crawl each channel
+            for ch in channels:
+                if stop.is_set():
+                    break
+                logger.info("sync: crawling channel=%s", ch)
+                try:
+                    if ch == "trickest_cve":
+                        cfg = settings.to_crawl_config()
+                        cfg.data_dir = settings.trickest_data_dir
+                        TrickestIngestService(cfg, raw_repos[ch]).sync(full=False)
+                    elif ch == "cvelistv5":
+                        cfg = settings.to_crawl_config()
+                        cfg.data_dir = settings.cvelistv5_data_dir
+                        CvelistV5IngestService(cfg, raw_repos[ch]).sync(full=False)
+                    else:
+                        RawIngestService(settings.to_crawl_config(), raw_repos[ch]).crawl_incremental()
+                except Exception as exc:
+                    logger.error("sync: crawl channel=%s failed: %s", ch, exc)
+
+            # Phase 2: GitHub deps (discover + worker)
+            if not stop.is_set():
+                logger.info("sync: github-deps discover + worker")
+                try:
+                    for ch, repo in raw_repos.items():
+                        sbom_service.raw_repo = repo
+                        sbom_service.discover_from_recent(channel=ch)
+                    sbom_service.run_worker(
+                        max_repos=github_max_repos,
+                        max_seconds=github_max_seconds,
+                        priority=priority,
+                    )
+                except Exception as exc:
+                    logger.error("sync: github-deps phase failed: %s", exc)
+
+            # Phase 3: GitHub languages (discover + worker)
+            if not stop.is_set():
+                logger.info("sync: github-languages discover + worker")
+                try:
+                    for ch, repo in raw_repos.items():
+                        langs_service.raw_repo = repo
+                        langs_service.discover_from_recent(channel=ch)
+                    langs_service.run_worker(
+                        max_repos=github_max_repos,
+                        max_seconds=github_max_seconds,
+                        priority=priority,
+                    )
+                except Exception as exc:
+                    logger.error("sync: github-languages phase failed: %s", exc)
+
+            elapsed = time.time() - cycle_start
+            wait = max(0.0, interval - elapsed)
+            if not stop.is_set() and wait > 0:
+                logger.info("sync: cycle done in %.0fs, sleeping %.0fs until next cycle", elapsed, wait)
+                stop.wait(wait)
+
+        logger.info("sync: stopped")
         return
 
     # --- Crawl ---------------------------------------------------------------

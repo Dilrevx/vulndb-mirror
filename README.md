@@ -11,9 +11,9 @@
 
 | Channel | 数据源 | 特点 |
 |---------|--------|------|
-| `aliyun`（默认）| [avd.aliyun.com](https://avd.aliyun.com) | 含 CVSS / CWE / severity，需 Playwright |
+| `cvelistv5`（默认）| [CVEProject/cvelistV5](https://github.com/CVEProject/cvelistV5) | 官方 CVE JSON 5.0，含 patch/reference URL |
 | `trickest_cve` | [trickest/cve](https://github.com/trickest/cve) | 含 PoC/GitHub 引用，通过 git clone/pull 同步 |
-| `cvelistv5` | [CVEProject/cvelistV5](https://github.com/CVEProject/cvelistV5) | 官方 CVE JSON 5.0，含 patch/reference URL |
+| `aliyun` | [avd.aliyun.com](https://avd.aliyun.com) | 含 CVSS / CWE / severity，需 Playwright |
 
 ## 安装
 
@@ -21,13 +21,61 @@
 uv sync
 uv run playwright install chromium   # 仅 aliyun channel 需要
 cp .env.example .env
+# 编辑 .env，至少填写 GITHUB_TOKEN
+```
+
+## 快速运行
+
+**一条命令启动全量同步（推荐放 tmux）：**
+
+```bash
+uv run vulndb-mirror sync                          # 默认 cvelistv5，每小时一轮
+uv run vulndb-mirror sync --channel cvelistv5 trickest_cve   # 多 channel
+uv run vulndb-mirror sync --interval 7200          # 自定义间隔（秒）
+```
+
+每轮依次执行：① 同步 CVE 数据 → ② 补全 GitHub 依赖图 → ③ 补全 GitHub 语言组成。
+
+**启动 API 服务：**
+
+```bash
+uv run vulndb-mirror api
+```
+
+**启动 Web 前端：**
+
+```bash
+cd web && npm install && npm run dev
 ```
 
 ## CLI
 
-### CVE 数据同步
+### `sync` — 定时全量同步（推荐）
 
-**Aliyun channel（默认）**
+```bash
+uv run vulndb-mirror sync [--channel cvelistv5 trickest_cve] [--interval 3600]
+                          [--patch-only] [--github-max-repos 500] [--github-max-seconds 1800]
+```
+
+每轮循环：
+1. 对每个 channel 执行增量 CVE 同步
+2. 从新 CVE 中提取 GitHub 仓库入队，运行 SBOM worker
+3. 同上，运行语言组成 worker
+4. 等待至下一个 `--interval` 秒，重复
+
+`Ctrl-C` / `SIGTERM` 在当前阶段结束后优雅退出。
+
+### CVE 数据同步（单次）
+
+**cvelistv5 / trickest_cve channel**
+
+```bash
+uv run vulndb-mirror crawl --channel cvelistv5
+uv run vulndb-mirror crawl --channel trickest_cve
+uv run vulndb-mirror crawl --channel cvelistv5 --full   # 强制全量重导入
+```
+
+**Aliyun channel**
 
 ```bash
 uv run vulndb-mirror crawl                  # 增量同步
@@ -37,18 +85,7 @@ uv run vulndb-mirror retry --pages 50 51    # 重试指定页
 
 默认 `SYNC_MODE=hybrid`：先从第 1 页做前段增量，跳过已有成功 checkpoint 的中间页，保留前 `HEAD_RECHECK_PAGES` 页强制重查。如需旧的线性行为：`SYNC_MODE=linear uv run vulndb-mirror crawl`
 
-**Trickest CVE / cvelistV5 channel**
-
-```bash
-uv run vulndb-mirror crawl --channel trickest_cve   # 增量同步（首次自动 clone）
-uv run vulndb-mirror crawl --channel cvelistv5
-uv run vulndb-mirror crawl --channel trickest_cve --full   # 强制全量重导入
-uv run vulndb-mirror crawl --channel cvelistv5 --full
-```
-
-数据分别写入 `./output/trickest_cve/` 和 `./output/cvelistv5/`。
-
-### GitHub 缓存服务
+### GitHub 缓存服务（独立长驻，可替代 `sync`）
 
 对 CVE 引用的 GitHub 仓库调用 GitHub API，将依赖图（SBOM）和语言组成缓存到本地。需要设置 `GITHUB_TOKEN`（PAT，5000 req/h，两个服务共享配额）。
 
@@ -56,8 +93,6 @@ uv run vulndb-mirror crawl --channel cvelistv5 --full
 |------|------|----------|
 | 依赖图 | `github-deps` | SBOM 依赖包列表，支持反查"哪些 CVE 影响某个包" |
 | 语言组成 | `github-languages` | 各语言字节数，支持反查"哪些仓库用某语言编写" |
-
-**启动长驻服务**（推荐在 tmux 中运行）：
 
 ```bash
 uv run vulndb-mirror github-deps run
@@ -69,7 +104,7 @@ uv run vulndb-mirror github-languages run
 --discover-interval 1800            # 发现间隔秒数（默认 3600）
 ```
 
-**服务循环**：启动 → 扫描近 30 天 CVE 入队 → 持续拉取（受 hourly budget 限速）→ 队列清空后补充历史数据 → 每隔 `--discover-interval` 秒重复。`Ctrl-C` / `SIGTERM` 优雅退出。
+**服务循环**：启动 → 扫描近 30 天 CVE 入队 → 持续拉取（受 hourly budget 限速）→ 队列清空后补充历史数据 → 每隔 `--discover-interval` 秒重复。
 
 **缓存时效**：无固定过期时间。仓库被抓取后保持 `fetched` 状态；当新 CVE 再次引用同一仓库时，自动重置为 `pending` 触发重新拉取。`skip_404` / `skip_403` 是终态，不会被重置。
 
@@ -91,7 +126,7 @@ RAWDB_API_PORT=8791 uv run vulndb-mirror api
 
 ```env
 # 通用
-CHANNEL=aliyun
+CHANNEL=cvelistv5
 SYNC_MODE=hybrid
 HEAD_SKIP_OK_PAGES=true
 HEAD_RECHECK_PAGES=10
