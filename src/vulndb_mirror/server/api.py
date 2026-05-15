@@ -5,13 +5,13 @@ from typing import Any, Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from vulndb_mirror.storage.github_sbom_ingest_service import (
+from vulndb_mirror.storage.github_deps.ingest_service import (
     GithubSbomIngestService,
 )
-from vulndb_mirror.storage.github_sbom_repository import GitHubSbomRepository
-from vulndb_mirror.storage.ingest_service import RawIngestService
-from vulndb_mirror.storage.raw_models import RetryRequest
-from vulndb_mirror.storage.repositories import RawRepository
+from vulndb_mirror.storage.github_deps.repository import GitHubSbomRepository
+from vulndb_mirror.storage.raw.ingest_service import RawIngestService
+from vulndb_mirror.storage.raw.raw_models import RetryRequest
+from vulndb_mirror.storage.raw.repositories import RawRepository
 
 
 def create_app(

@@ -28,12 +28,12 @@ from vulndb_mirror.crawler.github_sbom import (
     SbomResult,
 )
 from vulndb_mirror.models import RawAVDEntry
-from vulndb_mirror.storage.github_sbom_repository import (
+from vulndb_mirror.storage.github_deps.repository import (
     GitHubSbomRepository,
     SbomQueueItem,
 )
-from vulndb_mirror.storage.raw_models import now_iso
-from vulndb_mirror.storage.repositories import RawRepository, SqliteRawRepository
+from vulndb_mirror.storage.raw.raw_models import now_iso
+from vulndb_mirror.storage.raw.repositories import RawRepository, SqliteRawRepository
 
 logger = logging.getLogger(__name__)
 

@@ -16,8 +16,8 @@ from pydantic import BaseModel, Field
 
 from vulndb_mirror.config import CrawlConfig
 from vulndb_mirror.crawler.cvelistv5 import CvelistV5Crawler
-from vulndb_mirror.storage.raw_models import now_iso
-from vulndb_mirror.storage.repositories import RawRepository
+from .raw_models import now_iso
+from .repositories import RawRepository
 
 logger = logging.getLogger(__name__)
 

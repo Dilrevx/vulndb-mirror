@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from vulndb_mirror.config import CrawlerSettings
-from vulndb_mirror.storage.repositories import (
+from .repositories import (
     DualWriteRawRepository,
     FileRawRepository,
     RawRepository,

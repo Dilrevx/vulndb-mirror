@@ -18,11 +18,11 @@ from vulndb_mirror.crawler.github_sbom import (
     SbomResult,
 )
 from vulndb_mirror.models import RawAVDEntry
-from vulndb_mirror.storage.github_sbom_ingest_service import (
+from vulndb_mirror.storage.github_deps.ingest_service import (
     GithubSbomIngestService,
 )
-from vulndb_mirror.storage.github_sbom_repository import GitHubSbomRepository
-from vulndb_mirror.storage.repositories import SqliteRawRepository
+from vulndb_mirror.storage.github_deps.repository import GitHubSbomRepository
+from vulndb_mirror.storage.raw.repositories import SqliteRawRepository
 
 
 def _make_entry(cve_id: str, *, refs: list[str], patches: list[str]) -> RawAVDEntry:

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from vulndb_mirror.crawler.github_sbom import ParsedPackage, RepoRef
-from vulndb_mirror.storage.raw_models import now_iso
+from vulndb_mirror.storage.raw.raw_models import now_iso
 
 logger = logging.getLogger(__name__)
 

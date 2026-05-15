@@ -12,15 +12,15 @@ import uvicorn
 from vulndb_mirror.config import CrawlerSettings
 from vulndb_mirror.crawler.github_sbom import GitHubSbomCrawler
 from vulndb_mirror.server.api import create_app
-from vulndb_mirror.storage.github_sbom_ingest_service import (
+from vulndb_mirror.storage.github_deps.ingest_service import (
     GithubSbomIngestService,
 )
-from vulndb_mirror.storage.github_sbom_repository import GitHubSbomRepository
-from vulndb_mirror.storage.ingest_service import RawIngestService
-from vulndb_mirror.storage.repositories import RawRepository
-from vulndb_mirror.storage.repository_factory import build_raw_repository
-from vulndb_mirror.storage.trickest_ingest_service import TrickestIngestService
-from vulndb_mirror.storage.cvelistv5_ingest_service import CvelistV5IngestService
+from vulndb_mirror.storage.github_deps.repository import GitHubSbomRepository
+from vulndb_mirror.storage.raw.ingest_service import RawIngestService
+from vulndb_mirror.storage.raw.repositories import RawRepository
+from vulndb_mirror.storage.raw.repository_factory import build_raw_repository
+from vulndb_mirror.storage.raw.trickest_ingest_service import TrickestIngestService
+from vulndb_mirror.storage.raw.cvelistv5_ingest_service import CvelistV5IngestService
 
 
 def _setup_logging(log_dir: str | None) -> None:

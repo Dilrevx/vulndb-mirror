@@ -9,14 +9,14 @@ from playwright.async_api import async_playwright
 
 from vulndb_mirror.config import CrawlConfig
 from vulndb_mirror.crawler.core import _BROWSER_ARGS, _STEALTH, _USER_AGENT, AVDCrawler
-from vulndb_mirror.storage.raw_models import (
+from .raw_models import (
     CrawlPhaseResult,
     CrawlRunResult,
     PageCheckpoint,
     RetryResult,
     now_iso,
 )
-from vulndb_mirror.storage.repositories import RawRepository
+from .repositories import RawRepository
 
 logger = logging.getLogger(__name__)
 

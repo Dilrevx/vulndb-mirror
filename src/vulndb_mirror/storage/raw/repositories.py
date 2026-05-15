@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from vulndb_mirror.models import RawAVDEntry
-from vulndb_mirror.storage.raw_models import (
+from .raw_models import (
     PageCheckpoint,
     PageGap,
     RawMeta,
