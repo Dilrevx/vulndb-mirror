@@ -45,8 +45,10 @@ uv run vulndb-mirror api
 **启动 Web 前端：**
 
 ```bash
-cd web && npm install && npm run dev
+cd web && npm install && npm run dev:full
 ```
+
+默认会自动启动前端服务在 `3000` 端口和后端 API服务在 `8787` 端口。前端通过 Next.js 的反向代理（Rewrite）自动将 `/api/*` 的请求路由到后端。
 
 ## CLI
 

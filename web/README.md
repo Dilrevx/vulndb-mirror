@@ -33,6 +33,8 @@ npm run dev:full
 
 Default UI URL: `http://127.0.0.1:3000`
 
+The Next.js frontend has a built-in proxy (rewrites) that automatically forwards any requests to `/api/*` on port `3000` to the actual backend running on `8787`. You do not need to configure CORS.
+
 ## Build & Lint
 
 ```bash
@@ -43,5 +45,4 @@ npm run build
 ## Notes
 
 - `dev:full` starts backend via `uv run vulndb-mirror api`.
-- If backend port `8787` is occupied, run backend separately with
-	`RAWDB_API_PORT=<port>` and update `NEXT_PUBLIC_API_BASE` accordingly.
+- If backend port `8787` is occupied, you need to change it in your Backend environment (`RAWDB_API_PORT=<port>`) **and** update the `destination` proxy rule in `web/next.config.ts` to match the new port.
