@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import type { PkgByPackageItem, LangByLanguageItem, TopPackageItem, TopLanguageItem, CweLanguageStatsItem } from "@/types";
 import { LANG_COLORS } from "@/lib/utils";
 import { GithubStatsCard } from "@/components/GithubStatsCard";
+import { useColumnResize } from "@/hooks/useColumnResize";
 
 interface GithubTabProps {
     depsStats: Record<string, number> | null;
@@ -49,6 +50,12 @@ export function GithubTab({
     cweStats, cweStatsLoading, loadCweStats,
 }: GithubTabProps) {
     const [cweLangFilter, setCweLangFilter] = useState("");
+
+    const topPkgResize = useColumnResize();
+    const topLangResize = useColumnResize();
+    const cweResize = useColumnResize({ cwe: 320 });
+    const pkgResize = useColumnResize();
+    const langResize = useColumnResize();
 
     const cweStatsSorted = useMemo(() => {
         if (!cweStats) return null;
@@ -131,8 +138,14 @@ export function GithubTab({
                                 <thead>
                                     <tr className="border-b border-slate-200 text-left text-slate-500 sticky top-0 bg-white">
                                         <th className="pb-2 pr-4 font-medium w-8">#</th>
-                                        <th className="pb-2 pr-4 font-medium">包名</th>
-                                        <th className="pb-2 pr-4 font-medium">ecosystem</th>
+                                        <th ref={topPkgResize.ref("pkg")} style={topPkgResize.style("pkg")} className="pb-2 pr-4 font-medium relative">
+                                            包名
+                                            <div className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-200 bg-slate-100" onMouseDown={topPkgResize.onResizeStart("pkg")} />
+                                        </th>
+                                        <th ref={topPkgResize.ref("eco")} style={topPkgResize.style("eco")} className="pb-2 pr-4 font-medium relative">
+                                            ecosystem
+                                            <div className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-200 bg-slate-100" onMouseDown={topPkgResize.onResizeStart("eco")} />
+                                        </th>
                                         <th className="pb-2 font-medium text-right">仓库数</th>
                                     </tr>
                                 </thead>
@@ -166,7 +179,10 @@ export function GithubTab({
                                 <thead>
                                     <tr className="border-b border-slate-200 text-left text-slate-500 sticky top-0 bg-white">
                                         <th className="pb-2 pr-4 font-medium w-8">#</th>
-                                        <th className="pb-2 pr-4 font-medium">语言</th>
+                                        <th ref={topLangResize.ref("lang")} style={topLangResize.style("lang")} className="pb-2 pr-4 font-medium relative">
+                                            语言
+                                            <div className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-200 bg-slate-100" onMouseDown={topLangResize.onResizeStart("lang")} />
+                                        </th>
                                         <th className="pb-2 pr-4 font-medium text-right">总字节</th>
                                         <th className="pb-2 pr-4 font-medium text-right">仓库数</th>
                                         <th className="pb-2 pr-4 font-medium text-right">CVE 数</th>
@@ -237,8 +253,14 @@ export function GithubTab({
                             <table className="w-full text-xs">
                                 <thead>
                                     <tr className="border-b border-slate-200 text-left text-slate-500 sticky top-0 bg-white">
-                                        <th className="pb-2 pr-4 font-medium">CWE</th>
-                                        <th className="pb-2 pr-4 font-medium">Top 语言</th>
+                                        <th ref={cweResize.ref("cwe")} style={cweResize.style("cwe")} className="pb-2 pr-4 font-medium relative">
+                                            CWE
+                                            <div className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-200 bg-slate-100" onMouseDown={cweResize.onResizeStart("cwe")} />
+                                        </th>
+                                        <th ref={cweResize.ref("langs")} style={cweResize.style("langs")} className="pb-2 pr-4 font-medium relative">
+                                            Top 语言
+                                            <div className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-200 bg-slate-100" onMouseDown={cweResize.onResizeStart("langs")} />
+                                        </th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
@@ -246,11 +268,12 @@ export function GithubTab({
                                         const totalBytes = cwe.languages.reduce((s, l) => s + l.total_bytes, 0);
                                         return (
                                             <tr key={cwe.cwe_id} className="text-slate-700 hover:bg-slate-50 align-top">
-                                                <td className="py-1.5 pr-4 font-mono whitespace-nowrap">
-                                                    <span className="font-medium">{cwe.cwe_id}</span>
+                                                <td className="py-1.5 pr-4 font-mono min-w-0">
+                                                    <span className="font-medium shrink-0">{cwe.cwe_id}</span>
                                                     {cwe.cwe_description && (
                                                         <span
-                                                            className="ml-1.5 text-slate-500 truncate inline-block max-w-[12rem] align-bottom"
+                                                            className="ml-1.5 text-slate-500 truncate inline-block align-bottom"
+                                                            style={{ maxWidth: "calc(100% - 8ch)" }}
                                                             title={cwe.cwe_description}
                                                         >
                                                             {cwe.cwe_description}
@@ -314,9 +337,18 @@ export function GithubTab({
                             <table className="w-full text-xs">
                                 <thead>
                                     <tr className="border-b border-slate-200 text-left text-slate-500">
-                                        <th className="pb-2 pr-4 font-medium">仓库</th>
-                                        <th className="pb-2 pr-4 font-medium">ecosystem</th>
-                                        <th className="pb-2 pr-4 font-medium">包名</th>
+                                        <th ref={pkgResize.ref("repo")} style={pkgResize.style("repo")} className="pb-2 pr-4 font-medium relative">
+                                            仓库
+                                            <div className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-200 bg-slate-100" onMouseDown={pkgResize.onResizeStart("repo")} />
+                                        </th>
+                                        <th ref={pkgResize.ref("eco")} style={pkgResize.style("eco")} className="pb-2 pr-4 font-medium relative">
+                                            ecosystem
+                                            <div className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-200 bg-slate-100" onMouseDown={pkgResize.onResizeStart("eco")} />
+                                        </th>
+                                        <th ref={pkgResize.ref("pkg")} style={pkgResize.style("pkg")} className="pb-2 pr-4 font-medium relative">
+                                            包名
+                                            <div className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-200 bg-slate-100" onMouseDown={pkgResize.onResizeStart("pkg")} />
+                                        </th>
                                         <th className="pb-2 pr-4 font-medium">版本</th>
                                         <th className="pb-2 pr-4 font-medium">关系</th>
                                         <th className="pb-2 font-medium">CVE 数</th>
@@ -369,8 +401,14 @@ export function GithubTab({
                             <table className="w-full text-xs">
                                 <thead>
                                     <tr className="border-b border-slate-200 text-left text-slate-500">
-                                        <th className="pb-2 pr-4 font-medium">仓库</th>
-                                        <th className="pb-2 pr-4 font-medium">语言</th>
+                                        <th ref={langResize.ref("repo")} style={langResize.style("repo")} className="pb-2 pr-4 font-medium relative">
+                                            仓库
+                                            <div className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-200 bg-slate-100" onMouseDown={langResize.onResizeStart("repo")} />
+                                        </th>
+                                        <th ref={langResize.ref("lang")} style={langResize.style("lang")} className="pb-2 pr-4 font-medium relative">
+                                            语言
+                                            <div className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-200 bg-slate-100" onMouseDown={langResize.onResizeStart("lang")} />
+                                        </th>
                                         <th className="pb-2 pr-4 font-medium">字节数</th>
                                         <th className="pb-2 pr-4 font-medium">优先级</th>
                                         <th className="pb-2 font-medium">CVE 数</th>
