@@ -162,6 +162,17 @@ def create_app(
     def github_deps_stats():
         return _require_sbom_repo().stats()
 
+    @app.get("/github-deps/top-packages")
+    def github_deps_top_packages(
+        limit: int = Query(default=50, ge=1, le=500),
+        ecosystem: Optional[str] = Query(default=None),
+    ):
+        return {"items": _require_sbom_repo().top_packages(limit=limit, ecosystem=ecosystem or None)}
+
+    @app.get("/github-deps/ecosystems")
+    def github_deps_ecosystems():
+        return {"items": _require_sbom_repo().ecosystems()}
+
     @app.get("/github-deps/by-package")
     def github_deps_by_package(
         name: str = Query(..., min_length=1),
@@ -229,6 +240,18 @@ def create_app(
     @app.get("/github-languages/stats")
     def github_languages_stats():
         return _require_languages_repo().stats()
+
+    @app.get("/github-languages/top-languages")
+    def github_languages_top_languages(
+        limit: int = Query(default=50, ge=1, le=500),
+    ):
+        return {"items": _require_languages_repo().top_languages(limit=limit)}
+
+    @app.get("/github-languages/cwe-stats")
+    def github_languages_cwe_stats(
+        limit: int = Query(default=100, ge=1, le=500),
+    ):
+        return {"items": _require_languages_repo().cwe_language_stats(limit=limit)}
 
     @app.get("/github-languages/by-language")
     def github_languages_by_language(

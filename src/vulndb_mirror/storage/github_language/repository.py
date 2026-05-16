@@ -316,6 +316,149 @@ class GitHubLanguagesRepository:
         }
         return out
 
+    def top_languages(self, limit: int = 50) -> list[dict]:
+        """Aggregate top languages by total bytes, with repo count,
+        unique CVE count, and unique CWE count per language."""
+        sql = (
+            "SELECT d.language, "
+            "       SUM(d.bytes) AS total_bytes, "
+            "       COUNT(DISTINCT d.owner || '/' || d.repo) AS repo_count "
+            "FROM github_languages_data AS d "
+            "JOIN github_languages_cache AS c "
+            "  ON c.owner = d.owner AND c.repo = d.repo "
+            "GROUP BY d.language "
+            "ORDER BY total_bytes DESC "
+            "LIMIT ?"
+        )
+        with self._connect() as conn:
+            rows = conn.execute(sql, (int(limit),)).fetchall()
+            results = []
+            for row in rows:
+                # Collect unique CVEs for this language
+                cve_rows = conn.execute(
+                    "SELECT DISTINCT c.source_cves "
+                    "FROM github_languages_data AS d "
+                    "JOIN github_languages_cache AS c "
+                    "  ON c.owner = d.owner AND c.repo = d.repo "
+                    "WHERE d.language = ?",
+                    (row["language"],),
+                ).fetchall()
+                unique_cves: set[str] = set()
+                for cr in cve_rows:
+                    try:
+                        cve_list = json.loads(cr["source_cves"] or "[]")
+                        if isinstance(cve_list, list):
+                            unique_cves.update(cve_list)
+                    except (TypeError, ValueError):
+                        pass
+
+                # Count unique CWEs from raw_entries for those CVEs
+                cwe_count = 0
+                if unique_cves:
+                    placeholders = ",".join("?" for _ in unique_cves)
+                    cwe_count = conn.execute(
+                        f"SELECT COUNT(DISTINCT json_extract(payload, '$.cwe_id')) "
+                        f"FROM raw_entries "
+                        f"WHERE cve_id IN ({placeholders}) "
+                        f"  AND json_extract(payload, '$.cwe_id') IS NOT NULL "
+                        f"  AND json_extract(payload, '$.cwe_id') != ''",
+                        tuple(unique_cves),
+                    ).fetchone()[0]
+
+                results.append({
+                    "language": row["language"],
+                    "total_bytes": int(row["total_bytes"]),
+                    "repo_count": int(row["repo_count"]),
+                    "cve_count": len(unique_cves),
+                    "cwe_count": int(cwe_count),
+                })
+        return results
+
+    def cwe_language_stats(self, limit: int = 100) -> list[dict]:
+        """For each CWE, aggregate language distribution across
+        repos referenced by CVEs with that CWE type."""
+        with self._connect() as conn:
+            # Collect all languages data with their CVE references
+            data_rows = conn.execute(
+                "SELECT d.language, d.bytes, c.source_cves "
+                "FROM github_languages_data AS d "
+                "JOIN github_languages_cache AS c "
+                "  ON c.owner = d.owner AND c.repo = d.repo"
+            ).fetchall()
+
+            # Build CVE → CWE map from raw_entries
+            all_cves: set[str] = set()
+            for dr in data_rows:
+                try:
+                    cve_list = json.loads(dr["source_cves"] or "[]")
+                    if isinstance(cve_list, list):
+                        all_cves.update(cve_list)
+                except (TypeError, ValueError):
+                    pass
+
+            cve_to_cwe: dict[str, str] = {}
+            batch_size = 500
+            cve_list = list(all_cves)
+            for i in range(0, len(cve_list), batch_size):
+                batch = cve_list[i:i + batch_size]
+                placeholders = ",".join("?" for _ in batch)
+                raw_rows = conn.execute(
+                    f"SELECT cve_id, json_extract(payload, '$.cwe_id') AS cwe_id "
+                    f"FROM raw_entries "
+                    f"WHERE cve_id IN ({placeholders}) "
+                    f"  AND json_extract(payload, '$.cwe_id') IS NOT NULL "
+                    f"  AND json_extract(payload, '$.cwe_id') != ''",
+                    tuple(batch),
+                ).fetchall()
+                for rr in raw_rows:
+                    if rr["cwe_id"]:
+                        cve_to_cwe[rr["cve_id"]] = rr["cwe_id"]
+
+            # Aggregate: CWE → language → (total_bytes, repo_set)
+            cwe_lang_bytes: dict[str, dict[str, int]] = {}
+            cwe_lang_repos: dict[str, dict[str, set[str]]] = {}
+            for dr in data_rows:
+                try:
+                    cve_list = json.loads(dr["source_cves"] or "[]")
+                    if not isinstance(cve_list, list):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                for cve_id in cve_list:
+                    cwe = cve_to_cwe.get(cve_id)
+                    if not cwe:
+                        continue
+                    lang = dr["language"]
+                    cwe_lang_bytes.setdefault(cwe, {}).setdefault(lang, 0)
+                    cwe_lang_bytes[cwe][lang] += int(dr["bytes"] or 0)
+                    cwe_lang_repos.setdefault(cwe, {}).setdefault(lang, set()).add(
+                        (cve_id,)  # count per CVE reference
+                    )
+
+            # Build result rows
+            results: list[dict] = []
+            for cwe in sorted(cwe_lang_bytes.keys()):
+                lang_list = []
+                for lang, total_bytes in sorted(
+                    cwe_lang_bytes[cwe].items(), key=lambda x: x[1], reverse=True
+                )[:10]:
+                    lang_list.append({
+                        "language": lang,
+                        "total_bytes": total_bytes,
+                        "repo_count": len(cwe_lang_repos.get(cwe, {}).get(lang, set())),
+                    })
+                results.append({
+                    "cwe_id": cwe,
+                    "languages": lang_list,
+                })
+
+            # Sort by total bytes descending, limit
+            results.sort(
+                key=lambda r: sum(l["total_bytes"] for l in r["languages"]),
+                reverse=True,
+            )
+            return results[:limit]
+
 
 def _row_to_repo_dict(row: sqlite3.Row, langs: list[sqlite3.Row]) -> dict:
     try:

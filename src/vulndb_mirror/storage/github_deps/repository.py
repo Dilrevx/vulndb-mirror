@@ -357,6 +357,44 @@ class GitHubSbomRepository:
         }
         return out
 
+    def top_packages(self, limit: int = 50, *, ecosystem: Optional[str] = None) -> list[dict]:
+        clauses = []
+        args: list[object] = []
+        if ecosystem:
+            clauses.append("ecosystem = ?")
+            args.append(ecosystem)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = (
+            "SELECT package_name, ecosystem, "
+            "       COUNT(DISTINCT owner || '/' || repo) AS repo_count "
+            "FROM github_sbom_packages "
+            f"{where} "
+            "GROUP BY package_name, ecosystem "
+            "ORDER BY repo_count DESC "
+            "LIMIT ?"
+        )
+        args.append(int(limit))
+        with self._connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [
+            {
+                "package_name": row["package_name"],
+                "ecosystem": row["ecosystem"],
+                "repo_count": int(row["repo_count"]),
+            }
+            for row in rows
+        ]
+
+    def ecosystems(self) -> list[str]:
+        sql = (
+            "SELECT DISTINCT ecosystem FROM github_sbom_packages "
+            "WHERE ecosystem IS NOT NULL AND ecosystem != '' "
+            "ORDER BY ecosystem"
+        )
+        with self._connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        return [row["ecosystem"] for row in rows]
+
 
 def _row_to_repo_dict(row: sqlite3.Row, packages: list[sqlite3.Row]) -> dict:
     try:

@@ -4,6 +4,7 @@ import type {
     ChannelId, CheckpointsResp, FilterDraft, GapsResp,
     GithubDepsData, GithubLangsData, LangByLanguageItem,
     PkgByPackageItem, QueryResp, RawItem, RepoGithubData, TabMode,
+    TopPackageItem, TopLanguageItem, CweLanguageStatsItem,
 } from "@/types";
 import { apiGet, apiPost } from "@/lib/api";
 import {
@@ -20,8 +21,8 @@ import { GithubTab } from "@/tabs/GithubTab";
 
 export default function Home() {
     const [activeTab, setActiveTab] = useState<TabMode>("search");
-    const [channel, setChannel] = useState<ChannelId>("aliyun");
-    const [channelList, setChannelList] = useState<ChannelId[]>(["aliyun"]);
+    const [channel, setChannel] = useState<ChannelId>("cvelistv5");
+    const [channelList, setChannelList] = useState<ChannelId[]>(["cvelistv5"]);
     const [query, setQuery] = useState<QueryResp | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
@@ -57,6 +58,13 @@ export default function Home() {
     const [langResults, setLangResults] = useState<LangByLanguageItem[] | null>(null);
     const [langLoading, setLangLoading] = useState(false);
     const [langError, setLangError] = useState("");
+    const [topPackages, setTopPackages] = useState<TopPackageItem[] | null>(null);
+    const [topLanguages, setTopLanguages] = useState<TopLanguageItem[] | null>(null);
+    const [topStatsLoading, setTopStatsLoading] = useState(false);
+    const [topEco, setTopEco] = useState("");
+    const [ecosystems, setEcosystems] = useState<string[]>([]);
+    const [cweStats, setCweStats] = useState<CweLanguageStatsItem[] | null>(null);
+    const [cweStatsLoading, setCweStatsLoading] = useState(false);
 
     const searchTokens = useMemo(() => parseSmartSearch(applied.search), [applied.search]);
 
@@ -139,7 +147,7 @@ export default function Home() {
         const params = new URLSearchParams(window.location.search);
         const initPage = Number(params.get("page") || "1");
         const initPageSize = Number(params.get("page_size") || "20");
-        const initChannel = params.get("channel") || "aliyun";
+        const initChannel = params.get("channel") || "cvelistv5";
         const tabValue = params.get("tab");
         const initTab: TabMode = tabValue === "debug" || tabValue === "ops" ? "debug" : "search";
         const initFilters: FilterDraft = {
@@ -307,15 +315,39 @@ export default function Home() {
 
     async function loadGithubStats(): Promise<void> {
         setStatsLoading(true);
+        setTopStatsLoading(true);
+        setCweStatsLoading(true);
         try {
-            const [d, l] = await Promise.all([
+            const [d, l, tp, tl, eco, cwe] = await Promise.all([
                 apiGet<Record<string, number>>("/github-deps/stats").catch(() => null),
                 apiGet<Record<string, number>>("/github-languages/stats").catch(() => null),
+                apiGet<{ items: TopPackageItem[] }>("/github-deps/top-packages?limit=50").catch(() => null),
+                apiGet<{ items: TopLanguageItem[] }>("/github-languages/top-languages?limit=50").catch(() => null),
+                apiGet<{ items: string[] }>("/github-deps/ecosystems").catch(() => null),
+                apiGet<{ items: CweLanguageStatsItem[] }>("/github-languages/cwe-stats?limit=100").catch(() => null),
             ]);
             setDepsStats(d);
             setLangsStats(l);
+            setTopPackages(tp?.items ?? null);
+            setTopLanguages(tl?.items ?? null);
+            setEcosystems(eco?.items ?? []);
+            setCweStats(cwe?.items ?? null);
         } finally {
             setStatsLoading(false);
+            setTopStatsLoading(false);
+            setCweStatsLoading(false);
+        }
+    }
+
+    async function loadTopPackages(eco?: string): Promise<void> {
+        setTopStatsLoading(true);
+        try {
+            const params = new URLSearchParams({ limit: "50" });
+            if (eco) params.set("ecosystem", eco);
+            const tp = await apiGet<{ items: TopPackageItem[] }>(`/github-deps/top-packages?${params}`).catch(() => null);
+            setTopPackages(tp?.items ?? null);
+        } finally {
+            setTopStatsLoading(false);
         }
     }
 
@@ -412,6 +444,14 @@ export default function Home() {
                         langLoading={langLoading}
                         langError={langError}
                         searchByLanguage={() => void searchByLanguage()}
+                        topPackages={topPackages}
+                        topLanguages={topLanguages}
+                        topStatsLoading={topStatsLoading}
+                        ecosystems={ecosystems}
+                        topEco={topEco}
+                        onEcoChange={(eco) => { setTopEco(eco); void loadTopPackages(eco || undefined); }}
+                        cweStats={cweStats}
+                        cweStatsLoading={cweStatsLoading}
                     />
                 ) : (
                     <DebugTab

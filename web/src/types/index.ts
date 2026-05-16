@@ -87,3 +87,26 @@ export type LangByLanguageItem = {
     owner: string; repo: string; language: string; bytes: number;
     priority: number; source_cves: string[]; fetched_at: string | null;
 };
+
+export type TopPackageItem = {
+    package_name: string;
+    ecosystem: string | null;
+    repo_count: number;
+};
+export type TopLanguageItem = {
+    language: string;
+    total_bytes: number;
+    repo_count: number;
+    cve_count: number;
+    cwe_count: number;
+};
+
+export type CweLanguageEntry = {
+    language: string;
+    total_bytes: number;
+    repo_count: number;
+};
+export type CweLanguageStatsItem = {
+    cwe_id: string;
+    languages: CweLanguageEntry[];
+};
