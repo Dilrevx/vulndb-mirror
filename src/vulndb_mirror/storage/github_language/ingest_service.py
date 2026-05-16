@@ -39,6 +39,8 @@ class DiscoverResult(BaseModel):
     cves_scanned: int = Field(default=0, ge=0)
     repos_seen: int = Field(default=0, ge=0)
     repos_enqueued: int = Field(default=0, ge=0)
+    repos_patch: int = Field(default=0, ge=0)
+    repos_ref: int = Field(default=0, ge=0)
     channel: Optional[str] = None
     since_iso: Optional[str] = None
     finished_at: str = Field(default_factory=now_iso)
@@ -125,6 +127,8 @@ class GithubLanguagesIngestService:
         cves_scanned = 0
         repos_seen = 0
         repos_enqueued = 0
+        repos_patch = 0
+        repos_ref = 0
         for cve_id, payload in rows_iter:
             cves_scanned += 1
             try:
@@ -135,21 +139,27 @@ class GithubLanguagesIngestService:
             if not refs:
                 continue
             repos_seen += len(refs)
+            repos_patch += sum(1 for r in refs if r.priority == 0)
+            repos_ref += sum(1 for r in refs if r.priority == 1)
             repos_enqueued += self.languages_repo.enqueue_many(
                 refs, source_cve=cve_id
             )
 
         logger.info(
-            "Languages discover: scanned=%d, repos_seen=%d, enqueued=%d (channel=%s)",
+            "Languages discover: scanned=%d, repos_seen=%d, enqueued=%d, patch=%d, ref=%d (channel=%s)",
             cves_scanned,
             repos_seen,
             repos_enqueued,
+            repos_patch,
+            repos_ref,
             channel,
         )
         return DiscoverResult(
             cves_scanned=cves_scanned,
             repos_seen=repos_seen,
             repos_enqueued=repos_enqueued,
+            repos_patch=repos_patch,
+            repos_ref=repos_ref,
             channel=channel,
             since_iso=since_iso,
         )
