@@ -91,7 +91,7 @@ class GitHubLanguagesRepository:
                     existing.append(source_cve)
                 new_priority = min(int(row["priority"]), int(ref.priority))
 
-                if current_status in ("fetched", "not_modified"):
+                if current_status in ("fetched", "not_modified", "error"):
                     new_status = "pending" if new_cve_added else current_status
                 else:
                     new_status = current_status

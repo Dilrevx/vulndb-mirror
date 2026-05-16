@@ -188,3 +188,37 @@ GIT_CLONE_VIA_SSH=false
 
 - `head_last_stop_page`: 上次前段增量停止页（aliyun）
 - `last_commit` / `last_sync`: 上次同步 commit hash 与时间（trickest）
+
+---
+
+## GitHub Cache 状态生命周期
+
+`sync` 命令在 CVE 抓取完成后会触发两阶段 GitHub 数据缓存：
+
+1. **Discover** — 从近期更新的 CVE 条目中提取 GitHub repo 引用并入队
+2. **Worker** — 按 `(priority ASC, enqueued_at ASC)` 顺序消费队列，抓取 SBOM/languages
+
+### `github_sbom_cache` / `github_languages_cache` 状态流转
+
+| 状态 | 含义 | 触发条件 | `next_batch` 是否挑选 | `enqueue_many` 行为 |
+|------|------|----------|----------------------|---------------------|
+| `pending` | 等待处理 | 首次发现或 `error`/`fetched` 遇到新 CVE | **是** | 保持 `pending`（不更新 `enqueued_at`） |
+| `fetched` | 已成功抓取 | HTTP 200 / 304 | 否 | 有新 CVE → 重置 `pending` 并更新 `enqueued_at`；否则保持不动 |
+| `skip_404` | repo 不存在或未开启 SBOM | HTTP 404 | 否 | **永久保持**，不再重试 |
+| `skip_403` | private / SBOM 功能禁用 | HTTP 403 | 否 | **永久保持**，不再重试 |
+| `error` | 瞬时错误 | HTTP 5xx / 网络异常 / 解析失败 | 否 | 有新 CVE → 重置 `pending` 并更新 `enqueued_at`；否则保持不动 |
+
+### 关键设计要点
+
+- **不重复拉取**：已 `fetched` 的 repo 只在有新 CVE 引用时才会重新检查 BOM 更新（新 CVE 可能意味着依赖发生了变化）
+- **优先队列**：`priority=0`（patch URL 来源）始终先于 `priority=1`（reference 来源）处理
+- **增量 discover**：sync 循环在第一轮全量扫描后，后续轮次仅扫描增量 CVE 条目（`since_iso`），避免重复入队
+- **`enqueued_at` 更新**：repo 因新 CVE 重新入队时 `enqueued_at` 会更新，使其排到同优先级队尾，确保 FIFO 公平性
+- **404/403 永久跳过**：这些状态表示 repo 本质不可达，不会浪费 API budget 重试
+- **error 可重试**：500/网络异常等瞬时错误，当引用了该 repo 的新 CVE 出现时给予重试机会
+
+### SBOM 与 Languages 的 304 行为差异
+
+GitHub `/languages` 端点返回 `ETag`，支持 `If-None-Match` 条件请求，缓存命中时返回 **304 Not Modified**，不消耗 API quota。
+
+GitHub `/dependency-graph/sbom` 端点**不返回 `ETag`**，每次请求均为完整 **200 OK** 响应，始终消耗 API quota。这是 GitHub API 的平台限制，不影响队列推进正确性，但意味着 SBOM 缓存的刷新会比 languages 慢。

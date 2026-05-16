@@ -99,7 +99,11 @@ class GitHubSbomRepository:
                     existing.append(source_cve)
                 new_priority = min(int(row["priority"]), int(ref.priority))
 
-                if current_status in ("fetched", "not_modified"):
+                # Transient errors (500, network issues) should be
+                # retryable when a new CVE references the repo.
+                # 404/403 are permanent skips — repo doesn't exist or is
+                # private/SBOM-disabled.
+                if current_status in ("fetched", "not_modified", "error"):
                     new_status = "pending" if new_cve_added else current_status
                 else:
                     new_status = current_status
