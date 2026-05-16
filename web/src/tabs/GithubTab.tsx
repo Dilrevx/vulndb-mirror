@@ -4,6 +4,7 @@ import type { PkgByPackageItem, LangByLanguageItem, TopPackageItem, TopLanguageI
 import { LANG_COLORS } from "@/lib/utils";
 import { GithubStatsCard } from "@/components/GithubStatsCard";
 import { useColumnResize } from "@/hooks/useColumnResize";
+import { useTableVirtualizer, useDynamicTableVirtualizer } from "@/hooks/useTableVirtualizer";
 
 interface GithubTabProps {
     depsStats: Record<string, number> | null;
@@ -72,6 +73,12 @@ export function GithubTab({
             .map((x) => x.cwe);
     }, [cweStats, cweLangFilter]);
 
+    const topPkgVirt = useTableVirtualizer(topPackages?.length ?? 0);
+    const topLangVirt = useTableVirtualizer(topLanguages?.length ?? 0);
+    const cweVirt = useDynamicTableVirtualizer(cweStatsSorted?.length ?? 0);
+    const pkgVirt = useTableVirtualizer(pkgResults?.length ?? 0);
+    const langVirt = useTableVirtualizer(langResults?.length ?? 0);
+
     const cweAllLangs = useMemo(() => {
         if (!cweStats) return [];
         const langs = new Set<string>();
@@ -133,10 +140,10 @@ export function GithubTab({
                 {topPackages !== null && (
                     topPackages.length === 0
                         ? <p className="text-sm text-slate-500">无数据</p>
-                        : <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                        : <div ref={topPkgVirt.scrollRef} className="overflow-x-auto max-h-80 overflow-y-auto">
                             <table ref={topPkgResize.tableRef} className="w-full text-xs table-fixed">
                                 <thead>
-                                    <tr className="border-b border-slate-200 text-left text-slate-500 sticky top-0 bg-white">
+                                    <tr className="border-b border-slate-200 text-left text-slate-500 sticky top-0 bg-white z-10">
                                         <th className="pb-2 pr-4 font-medium w-8">#</th>
                                         <th style={topPkgResize.thStyle("pkg")} className="pb-2 pr-4 font-medium relative">
                                             <span className="block truncate pr-2">包名</span>
@@ -153,15 +160,18 @@ export function GithubTab({
                                         <th className="pb-2 font-medium text-right">仓库数</th>
                                     </tr>
                                 </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                    {topPackages.map((item, i) => (
-                                        <tr key={item.package_name + (item.ecosystem ?? "")} className="text-slate-700 hover:bg-slate-50">
-                                            <td className="py-1.5 pr-4 text-slate-400">{i + 1}</td>
-                                            <td className="py-1.5 pr-4 font-medium overflow-hidden"><span className="block truncate">{item.package_name}</span></td>
-                                            <td className="py-1.5 pr-4 text-slate-500 overflow-hidden"><span className="block truncate">{item.ecosystem ?? "-"}</span></td>
-                                            <td className="py-1.5 text-right font-mono">{item.repo_count}</td>
-                                        </tr>
-                                    ))}
+                                <tbody style={{ height: topPkgVirt.virtualizer.getTotalSize() }} className="relative">
+                                    {topPkgVirt.virtualizer.getVirtualItems().map((vRow) => {
+                                        const item = topPackages[vRow.index];
+                                        return (
+                                            <tr key={vRow.key} data-index={vRow.index} className="absolute w-full text-slate-700 hover:bg-slate-50 border-b border-slate-100" style={{ transform: `translateY(${vRow.start}px)` }}>
+                                                <td className="py-1.5 pr-4 text-slate-400 w-8">{vRow.index + 1}</td>
+                                                <td className="py-1.5 pr-4 font-medium overflow-hidden" style={topPkgResize.thStyle("pkg")}><span className="block truncate">{item.package_name}</span></td>
+                                                <td className="py-1.5 pr-4 text-slate-500 overflow-hidden" style={topPkgResize.thStyle("eco")}><span className="block truncate">{item.ecosystem ?? "-"}</span></td>
+                                                <td className="py-1.5 text-right font-mono">{item.repo_count}</td>
+                                            </tr>
+                                        );
+                                    })}
                                 </tbody>
                             </table>
                         </div>
@@ -178,10 +188,10 @@ export function GithubTab({
                 {topLanguages !== null && (
                     topLanguages.length === 0
                         ? <p className="text-sm text-slate-500">无数据</p>
-                        : <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                        : <div ref={topLangVirt.scrollRef} className="overflow-x-auto max-h-80 overflow-y-auto">
                             <table ref={topLangResize.tableRef} className="w-full text-xs table-fixed">
                                 <thead>
-                                    <tr className="border-b border-slate-200 text-left text-slate-500 sticky top-0 bg-white">
+                                    <tr className="border-b border-slate-200 text-left text-slate-500 sticky top-0 bg-white z-10">
                                         <th className="pb-2 pr-4 font-medium w-8">#</th>
                                         <th style={topLangResize.thStyle("lang")} className="pb-2 pr-4 font-medium relative">
                                             <span className="block truncate pr-2">语言</span>
@@ -195,22 +205,25 @@ export function GithubTab({
                                         <th className="pb-2 font-medium text-right w-14">CWE 数</th>
                                     </tr>
                                 </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                    {topLanguages.map((item, i) => (
-                                        <tr key={item.language} className="text-slate-700 hover:bg-slate-50">
-                                            <td className="py-1.5 pr-4 text-slate-400">{i + 1}</td>
-                                            <td className="py-1.5 pr-4 overflow-hidden">
-                                                <span className="flex items-center gap-1.5 min-w-0">
-                                                    <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: LANG_COLORS[item.language] ?? "#8b949e" }} />
-                                                    <span className="font-medium truncate">{item.language}</span>
-                                                </span>
-                                            </td>
-                                            <td className="py-1.5 pr-4 text-right font-mono text-slate-500">{formatBytes(item.total_bytes)}</td>
-                                            <td className="py-1.5 pr-4 text-right font-mono">{item.repo_count}</td>
-                                            <td className="py-1.5 pr-4 text-right font-mono">{item.cve_count}</td>
-                                            <td className="py-1.5 text-right font-mono">{item.cwe_count}</td>
-                                        </tr>
-                                    ))}
+                                <tbody style={{ height: topLangVirt.virtualizer.getTotalSize() }} className="relative">
+                                    {topLangVirt.virtualizer.getVirtualItems().map((vRow) => {
+                                        const item = topLanguages[vRow.index];
+                                        return (
+                                            <tr key={vRow.key} data-index={vRow.index} className="absolute w-full text-slate-700 hover:bg-slate-50 border-b border-slate-100" style={{ transform: `translateY(${vRow.start}px)` }}>
+                                                <td className="py-1.5 pr-4 text-slate-400 w-8">{vRow.index + 1}</td>
+                                                <td className="py-1.5 pr-4 overflow-hidden" style={topLangResize.thStyle("lang")}>
+                                                    <span className="flex items-center gap-1.5 min-w-0">
+                                                        <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: LANG_COLORS[item.language] ?? "#8b949e" }} />
+                                                        <span className="font-medium truncate">{item.language}</span>
+                                                    </span>
+                                                </td>
+                                                <td className="py-1.5 pr-4 text-right font-mono text-slate-500 w-20">{formatBytes(item.total_bytes)}</td>
+                                                <td className="py-1.5 pr-4 text-right font-mono w-14">{item.repo_count}</td>
+                                                <td className="py-1.5 pr-4 text-right font-mono w-14">{item.cve_count}</td>
+                                                <td className="py-1.5 text-right font-mono w-14">{item.cwe_count}</td>
+                                            </tr>
+                                        );
+                                    })}
                                 </tbody>
                             </table>
                         </div>
@@ -255,10 +268,10 @@ export function GithubTab({
                 {cweStatsSorted !== null && (
                     cweStatsSorted.length === 0
                         ? <p className="text-sm text-slate-500">无数据</p>
-                        : <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                        : <div ref={cweVirt.scrollRef} className="overflow-x-auto max-h-96 overflow-y-auto">
                             <table ref={cweResize.tableRef} className="w-full text-xs table-fixed">
                                 <thead>
-                                    <tr className="border-b border-slate-200 text-left text-slate-500 sticky top-0 bg-white">
+                                    <tr className="border-b border-slate-200 text-left text-slate-500 sticky top-0 bg-white z-10">
                                         <th style={cweResize.thStyle("cwe")} className="pb-2 pr-4 font-medium relative">
                                             <span className="block truncate pr-2">CWE</span>
                                             <div className="absolute right-0 top-0 bottom-0 w-3 cursor-col-resize group" onMouseDown={cweResize.onResizeStart("cwe")}>
@@ -273,12 +286,13 @@ export function GithubTab({
                                         </th>
                                     </tr>
                                 </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                    {cweStatsSorted.map((cwe) => {
+                                <tbody style={{ height: cweVirt.virtualizer.getTotalSize() }} className="relative">
+                                    {cweVirt.virtualizer.getVirtualItems().map((vRow) => {
+                                        const cwe = cweStatsSorted[vRow.index];
                                         const totalBytes = cwe.languages.reduce((s, l) => s + l.total_bytes, 0);
                                         return (
-                                            <tr key={cwe.cwe_id} className="text-slate-700 hover:bg-slate-50 align-top">
-                                                <td className="py-1.5 pr-4 font-mono min-w-0">
+                                            <tr key={vRow.key} data-index={vRow.index} ref={cweVirt.virtualizer.measureElement} className="absolute w-full text-slate-700 hover:bg-slate-50 border-b border-slate-100 align-top" style={{ transform: `translateY(${vRow.start}px)` }}>
+                                                <td className="py-1.5 pr-4 font-mono min-w-0" style={cweResize.thStyle("cwe")}>
                                                     <span className="font-medium shrink-0">{cwe.cwe_id}</span>
                                                     {cwe.cwe_description && (
                                                         <span
@@ -290,7 +304,7 @@ export function GithubTab({
                                                         </span>
                                                     )}
                                                 </td>
-                                                <td className="py-1.5">
+                                                <td className="py-1.5" style={cweResize.thStyle("langs")}>
                                                     <div className="flex flex-wrap gap-x-2 gap-y-0.5">
                                                         {cwe.languages.map((l) => {
                                                             const pct = totalBytes > 0 ? (l.total_bytes / totalBytes * 100).toFixed(1) : "0.0";
@@ -343,10 +357,10 @@ export function GithubTab({
                 {pkgResults !== null && (
                     pkgResults.length === 0
                         ? <p className="text-sm text-slate-500">无结果</p>
-                        : <div className="overflow-x-auto">
+                        : <div ref={pkgVirt.scrollRef} className="overflow-x-auto max-h-96 overflow-y-auto">
                             <table ref={pkgResize.tableRef} className="w-full text-xs table-fixed">
                                 <thead>
-                                    <tr className="border-b border-slate-200 text-left text-slate-500">
+                                    <tr className="border-b border-slate-200 text-left text-slate-500 sticky top-0 bg-white z-10">
                                         <th style={pkgResize.thStyle("repo")} className="pb-2 pr-4 font-medium relative">
                                             <span className="block truncate pr-2">仓库</span>
                                             <div className="absolute right-0 top-0 bottom-0 w-3 cursor-col-resize group" onMouseDown={pkgResize.onResizeStart("repo")}>
@@ -370,21 +384,24 @@ export function GithubTab({
                                         <th className="pb-2 font-medium w-14">CVE 数</th>
                                     </tr>
                                 </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                    {pkgResults.map((item, i) => (
-                                        <tr key={i} className="text-slate-700">
-                                            <td className="py-1.5 pr-4 font-mono overflow-hidden">
-                                                <a href={`https://github.com/${item.owner}/${item.repo}`} target="_blank" rel="noreferrer" className="block truncate text-blue-700 hover:underline">
-                                                    {item.owner}/{item.repo}
-                                                </a>
-                                            </td>
-                                            <td className="py-1.5 pr-4 text-slate-500 overflow-hidden"><span className="block truncate">{item.ecosystem ?? "-"}</span></td>
-                                            <td className="py-1.5 pr-4 overflow-hidden"><span className="block truncate">{item.package_name}</span></td>
-                                            <td className="py-1.5 pr-4 text-slate-500">{item.version_info ?? "-"}</td>
-                                            <td className="py-1.5 pr-4 text-slate-500">{item.relationship ?? "-"}</td>
-                                            <td className="py-1.5">{item.source_cves.length}</td>
-                                        </tr>
-                                    ))}
+                                <tbody style={{ height: pkgVirt.virtualizer.getTotalSize() }} className="relative">
+                                    {pkgVirt.virtualizer.getVirtualItems().map((vRow) => {
+                                        const item = pkgResults[vRow.index];
+                                        return (
+                                            <tr key={vRow.key} data-index={vRow.index} className="absolute w-full text-slate-700 border-b border-slate-100 hover:bg-slate-50" style={{ transform: `translateY(${vRow.start}px)` }}>
+                                                <td className="py-1.5 pr-4 font-mono overflow-hidden" style={pkgResize.thStyle("repo")}>
+                                                    <a href={`https://github.com/${item.owner}/${item.repo}`} target="_blank" rel="noreferrer" className="block truncate text-blue-700 hover:underline">
+                                                        {item.owner}/{item.repo}
+                                                    </a>
+                                                </td>
+                                                <td className="py-1.5 pr-4 text-slate-500 overflow-hidden" style={pkgResize.thStyle("eco")}><span className="block truncate">{item.ecosystem ?? "-"}</span></td>
+                                                <td className="py-1.5 pr-4 overflow-hidden" style={pkgResize.thStyle("pkg")}><span className="block truncate">{item.package_name}</span></td>
+                                                <td className="py-1.5 pr-4 text-slate-500 w-20">{item.version_info ?? "-"}</td>
+                                                <td className="py-1.5 pr-4 text-slate-500 w-16">{item.relationship ?? "-"}</td>
+                                                <td className="py-1.5 w-14">{item.source_cves.length}</td>
+                                            </tr>
+                                        );
+                                    })}
                                 </tbody>
                             </table>
                         </div>
@@ -413,10 +430,10 @@ export function GithubTab({
                 {langResults !== null && (
                     langResults.length === 0
                         ? <p className="text-sm text-slate-500">无结果</p>
-                        : <div className="overflow-x-auto">
+                        : <div ref={langVirt.scrollRef} className="overflow-x-auto max-h-96 overflow-y-auto">
                             <table ref={langResize.tableRef} className="w-full text-xs table-fixed">
                                 <thead>
-                                    <tr className="border-b border-slate-200 text-left text-slate-500">
+                                    <tr className="border-b border-slate-200 text-left text-slate-500 sticky top-0 bg-white z-10">
                                         <th style={langResize.thStyle("repo")} className="pb-2 pr-4 font-medium relative">
                                             <span className="block truncate pr-2">仓库</span>
                                             <div className="absolute right-0 top-0 bottom-0 w-3 cursor-col-resize group" onMouseDown={langResize.onResizeStart("repo")}>
@@ -434,25 +451,28 @@ export function GithubTab({
                                         <th className="pb-2 font-medium w-14">CVE 数</th>
                                     </tr>
                                 </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                    {langResults.map((item, i) => (
-                                        <tr key={i} className="text-slate-700">
-                                            <td className="py-1.5 pr-4 font-mono overflow-hidden">
-                                                <a href={`https://github.com/${item.owner}/${item.repo}`} target="_blank" rel="noreferrer" className="block truncate text-blue-700 hover:underline">
-                                                    {item.owner}/{item.repo}
-                                                </a>
-                                            </td>
-                                            <td className="py-1.5 pr-4 overflow-hidden">
-                                                <span className="flex items-center gap-1 min-w-0">
-                                                    <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: LANG_COLORS[item.language] ?? "#8b949e" }} />
-                                                    <span className="truncate">{item.language}</span>
-                                                </span>
-                                            </td>
-                                            <td className="py-1.5 pr-4 text-slate-500">{(item.bytes / 1024).toFixed(1)} KB</td>
-                                            <td className="py-1.5 pr-4 text-slate-500">{item.priority}</td>
-                                            <td className="py-1.5">{item.source_cves.length}</td>
-                                        </tr>
-                                    ))}
+                                <tbody style={{ height: langVirt.virtualizer.getTotalSize() }} className="relative">
+                                    {langVirt.virtualizer.getVirtualItems().map((vRow) => {
+                                        const item = langResults[vRow.index];
+                                        return (
+                                            <tr key={vRow.key} data-index={vRow.index} className="absolute w-full text-slate-700 border-b border-slate-100 hover:bg-slate-50" style={{ transform: `translateY(${vRow.start}px)` }}>
+                                                <td className="py-1.5 pr-4 font-mono overflow-hidden" style={langResize.thStyle("repo")}>
+                                                    <a href={`https://github.com/${item.owner}/${item.repo}`} target="_blank" rel="noreferrer" className="block truncate text-blue-700 hover:underline">
+                                                        {item.owner}/{item.repo}
+                                                    </a>
+                                                </td>
+                                                <td className="py-1.5 pr-4 overflow-hidden" style={langResize.thStyle("lang")}>
+                                                    <span className="flex items-center gap-1 min-w-0">
+                                                        <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: LANG_COLORS[item.language] ?? "#8b949e" }} />
+                                                        <span className="truncate">{item.language}</span>
+                                                    </span>
+                                                </td>
+                                                <td className="py-1.5 pr-4 text-slate-500 w-20">{(item.bytes / 1024).toFixed(1)} KB</td>
+                                                <td className="py-1.5 pr-4 text-slate-500 w-14">{item.priority}</td>
+                                                <td className="py-1.5 w-14">{item.source_cves.length}</td>
+                                            </tr>
+                                        );
+                                    })}
                                 </tbody>
                             </table>
                         </div>
