@@ -358,6 +358,12 @@ class GitHubSbomRepository:
         return out
 
     def top_packages(self, limit: int = 50, *, ecosystem: Optional[str] = None) -> list[dict]:
+        """Top packages by distinct repo count.
+
+        Uses a subquery to avoid the expensive COUNT(DISTINCT string-concat)
+        on potentially millions of package rows. The inner DISTINCT deduplicates
+        the same package appearing in multiple manifests within a repo.
+        """
         clauses = []
         args: list[object] = []
         if ecosystem:
@@ -365,10 +371,12 @@ class GitHubSbomRepository:
             args.append(ecosystem)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = (
-            "SELECT package_name, ecosystem, "
-            "       COUNT(DISTINCT owner || '/' || repo) AS repo_count "
-            "FROM github_sbom_packages "
-            f"{where} "
+            "SELECT package_name, ecosystem, COUNT(*) AS repo_count "
+            "FROM ("
+            "  SELECT DISTINCT package_name, ecosystem, owner, repo "
+            "  FROM github_sbom_packages "
+            f"  {where}"
+            ") AS dedup "
             "GROUP BY package_name, ecosystem "
             "ORDER BY repo_count DESC "
             "LIMIT ?"

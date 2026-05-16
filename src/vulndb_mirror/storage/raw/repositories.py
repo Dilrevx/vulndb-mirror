@@ -469,6 +469,10 @@ class SqliteRawRepository(RawRepository):
             "CREATE INDEX IF NOT EXISTS idx_sbom_pkg_lookup "
             "ON github_sbom_packages(ecosystem, package_name)"
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sbom_pkg_top "
+            "ON github_sbom_packages(ecosystem, package_name, owner, repo)"
+        )
 
     def _init_github_languages_tables(self, conn: sqlite3.Connection) -> None:
         """Bootstrap the GitHub languages cache tables."""
