@@ -84,31 +84,47 @@ class GitHubSbomRepository:
                     continue
 
                 # Merge: priority lowers (toward 0); source_cves dedupes.
-                # If the repo was already fetched, a new CVE referencing it
-                # means its dependencies may have changed — reset to pending.
+                # Only reset to pending when a *new* CVE references an
+                # already-cached repo — otherwise keep its current status
+                # so the worker doesn't re-fetch the same repos every cycle.
                 try:
                     existing = json.loads(row["source_cves"] or "[]")
                     if not isinstance(existing, list):
                         existing = []
                 except (TypeError, ValueError):
                     existing = []
-                if source_cve and source_cve not in existing:
+                current_status = row["status"]
+                new_cve_added = bool(source_cve and source_cve not in existing)
+                if new_cve_added:
                     existing.append(source_cve)
                 new_priority = min(int(row["priority"]), int(ref.priority))
-                current_status = row["status"]
-                new_status = (
-                    "pending"
-                    if current_status in ("fetched", "not_modified")
-                    else current_status
-                )
-                conn.execute(
-                    """
-                    UPDATE github_sbom_cache
-                    SET priority=?, source_cves=?, status=?, updated_at=?
-                    WHERE owner=? AND repo=?
-                    """,
-                    (new_priority, json.dumps(existing), new_status, ts, ref.owner, ref.repo),
-                )
+
+                if current_status in ("fetched", "not_modified"):
+                    new_status = "pending" if new_cve_added else current_status
+                else:
+                    new_status = current_status
+
+                if new_status == "pending":
+                    conn.execute(
+                        """
+                        UPDATE github_sbom_cache
+                        SET priority=?, source_cves=?, status=?,
+                            enqueued_at=?, updated_at=?
+                        WHERE owner=? AND repo=?
+                        """,
+                        (new_priority, json.dumps(existing), new_status,
+                         ts, ts, ref.owner, ref.repo),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE github_sbom_cache
+                        SET priority=?, source_cves=?, status=?, updated_at=?
+                        WHERE owner=? AND repo=?
+                        """,
+                        (new_priority, json.dumps(existing), new_status,
+                         ts, ref.owner, ref.repo),
+                    )
                 touched += 1
             conn.commit()
         return touched

@@ -26,6 +26,7 @@ from vulndb_mirror.storage.github_language.ingest_service import (
 from vulndb_mirror.storage.github_language.repository import GitHubLanguagesRepository
 from vulndb_mirror.storage.raw.ingest_service import RawIngestService
 from vulndb_mirror.storage.raw.repositories import RawRepository
+from vulndb_mirror.storage.raw.raw_models import now_iso
 from vulndb_mirror.storage.raw.repository_factory import build_raw_repository
 from vulndb_mirror.storage.raw.trickest_ingest_service import TrickestIngestService
 from vulndb_mirror.storage.raw.cvelistv5_ingest_service import CvelistV5IngestService
@@ -472,6 +473,10 @@ def main() -> None:
             channels, interval, args.patch_only, github_max_repos, github_max_seconds,
         )
 
+        # Track last discover timestamp so subsequent cycles only scan
+        # recently-updated CVE rows instead of re-scanning the whole table.
+        last_discover_iso: Optional[str] = None
+
         while not stop.is_set():
             cycle_start = time.time()
 
@@ -500,7 +505,10 @@ def main() -> None:
                 try:
                     for ch, repo in raw_repos.items():
                         sbom_service.raw_repo = repo
-                        sbom_service.discover_from_recent(channel=ch)
+                        sbom_service.discover_from_recent(
+                            channel=ch, since_iso=last_discover_iso
+                        )
+                    last_discover_iso = now_iso()
                     sbom_service.run_worker(
                         max_repos=github_max_repos,
                         max_seconds=github_max_seconds,
@@ -515,7 +523,9 @@ def main() -> None:
                 try:
                     for ch, repo in raw_repos.items():
                         langs_service.raw_repo = repo
-                        langs_service.discover_from_recent(channel=ch)
+                        langs_service.discover_from_recent(
+                            channel=ch, since_iso=last_discover_iso
+                        )
                     langs_service.run_worker(
                         max_repos=github_max_repos,
                         max_seconds=github_max_seconds,
