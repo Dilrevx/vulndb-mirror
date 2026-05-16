@@ -1,4 +1,5 @@
 "use client";
+import { useMemo, useState } from "react";
 import type { PkgByPackageItem, LangByLanguageItem, TopPackageItem, TopLanguageItem, CweLanguageStatsItem } from "@/types";
 import { LANG_COLORS } from "@/lib/utils";
 import { GithubStatsCard } from "@/components/GithubStatsCard";
@@ -30,6 +31,7 @@ interface GithubTabProps {
     onEcoChange: (eco: string) => void;
     cweStats: CweLanguageStatsItem[] | null;
     cweStatsLoading: boolean;
+    loadCweStats: () => void;
 }
 
 function formatBytes(b: number): string {
@@ -44,8 +46,36 @@ export function GithubTab({
     pkgName, setPkgName, pkgEco, setPkgEco, pkgResults, pkgLoading, pkgError, searchByPackage,
     langName, setLangName, langResults, langLoading, langError, searchByLanguage,
     topPackages, topLanguages, topStatsLoading, ecosystems, topEco, onEcoChange,
-    cweStats, cweStatsLoading,
+    cweStats, cweStatsLoading, loadCweStats,
 }: GithubTabProps) {
+    const [cweLangFilter, setCweLangFilter] = useState("");
+
+    const cweStatsSorted = useMemo(() => {
+        if (!cweStats) return null;
+        if (!cweLangFilter) return cweStats;
+        return [...cweStats]
+            .map((cwe) => {
+                const totalBytes = cwe.languages.reduce((s, l) => s + l.total_bytes, 0);
+                const pct = totalBytes > 0
+                    ? (cwe.languages.find(l => l.language === cweLangFilter)?.total_bytes ?? 0) / totalBytes * 100
+                    : 0;
+                return { cwe, pct };
+            })
+            .sort((a, b) => b.pct - a.pct)
+            .map((x) => x.cwe);
+    }, [cweStats, cweLangFilter]);
+
+    const cweAllLangs = useMemo(() => {
+        if (!cweStats) return [];
+        const langs = new Set<string>();
+        for (const cwe of cweStats) {
+            for (const l of cwe.languages) {
+                langs.add(l.language);
+            }
+        }
+        return [...langs].sort();
+    }, [cweStats]);
+
     return (
         <section className="mt-4 space-y-4">
             <div className="flex items-center gap-3">
@@ -167,13 +197,41 @@ export function GithubTab({
 
             {/* CWE-language distribution */}
             <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
-                <h3 className="text-sm font-semibold">按 CWE 的语言分布</h3>
-                {cweStats === null && !cweStatsLoading && (
-                    <p className="text-xs text-slate-400">点击刷新统计加载</p>
+                <div className="flex items-center gap-3">
+                    <h3 className="text-sm font-semibold">按 CWE 的语言分布</h3>
+                    <button
+                        className="rounded border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                        disabled={cweStatsLoading}
+                        onClick={loadCweStats}
+                    >
+                        {cweStatsLoading ? "加载中…" : cweStats === null ? "点击加载" : "刷新"}
+                    </button>
+                    {cweStats && cweAllLangs.length > 0 && (
+                        <select
+                            className="rounded border border-slate-200 px-2 py-1 text-xs outline-none focus:border-blue-400"
+                            value={cweLangFilter}
+                            onChange={(e) => setCweLangFilter(e.target.value)}
+                        >
+                            <option value="">默认排序</option>
+                            {cweAllLangs.map((lang) => (
+                                <option key={lang} value={lang}>按 {lang} 占比排序</option>
+                            ))}
+                        </select>
+                    )}
+                    {cweLangFilter && (
+                        <button
+                            className="text-xs text-slate-400 hover:text-slate-600"
+                            onClick={() => setCweLangFilter("")}
+                        >
+                            清除
+                        </button>
+                    )}
+                </div>
+                {cweStats !== null && cweStats.length === 0 && !cweStatsLoading && (
+                    <p className="text-sm text-slate-500">无数据</p>
                 )}
-                {cweStatsLoading && <p className="text-xs text-slate-400">加载中…</p>}
-                {cweStats !== null && (
-                    cweStats.length === 0
+                {cweStatsSorted !== null && (
+                    cweStatsSorted.length === 0
                         ? <p className="text-sm text-slate-500">无数据</p>
                         : <div className="overflow-x-auto max-h-96 overflow-y-auto">
                             <table className="w-full text-xs">
@@ -184,7 +242,7 @@ export function GithubTab({
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
-                                    {cweStats.map((cwe) => {
+                                    {cweStatsSorted.map((cwe) => {
                                         const totalBytes = cwe.languages.reduce((s, l) => s + l.total_bytes, 0);
                                         return (
                                             <tr key={cwe.cwe_id} className="text-slate-700 hover:bg-slate-50 align-top">
@@ -193,11 +251,12 @@ export function GithubTab({
                                                     <div className="flex flex-wrap gap-x-2 gap-y-0.5">
                                                         {cwe.languages.map((l) => {
                                                             const pct = totalBytes > 0 ? (l.total_bytes / totalBytes * 100).toFixed(1) : "0.0";
+                                                            const highlighted = cweLangFilter && l.language === cweLangFilter;
                                                             return (
-                                                                <span key={l.language} className="inline-flex items-center gap-1 text-slate-600">
+                                                                <span key={l.language} className={`inline-flex items-center gap-1 ${highlighted ? "font-semibold text-blue-700" : "text-slate-600"}`}>
                                                                     <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: LANG_COLORS[l.language] ?? "#8b949e" }} />
                                                                     <span>{l.language}</span>
-                                                                    <span className="text-slate-400">({pct}%)</span>
+                                                                    <span className={highlighted ? "text-blue-500" : "text-slate-400"}>({pct}%)</span>
                                                                 </span>
                                                             );
                                                         })}

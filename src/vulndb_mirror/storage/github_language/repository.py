@@ -318,7 +318,10 @@ class GitHubLanguagesRepository:
 
     def top_languages(self, limit: int = 50) -> list[dict]:
         """Aggregate top languages by total bytes, with repo count,
-        unique CVE count, and unique CWE count per language."""
+        unique CVE count, and unique CWE count per language.
+
+        Uses 2 batch queries instead of per-language N+1 lookups.
+        """
         sql = (
             "SELECT d.language, "
             "       SUM(d.bytes) AS total_bytes, "
@@ -332,45 +335,64 @@ class GitHubLanguagesRepository:
         )
         with self._connect() as conn:
             rows = conn.execute(sql, (int(limit),)).fetchall()
-            results = []
-            for row in rows:
-                # Collect unique CVEs for this language
-                cve_rows = conn.execute(
-                    "SELECT DISTINCT c.source_cves "
-                    "FROM github_languages_data AS d "
-                    "JOIN github_languages_cache AS c "
-                    "  ON c.owner = d.owner AND c.repo = d.repo "
-                    "WHERE d.language = ?",
-                    (row["language"],),
-                ).fetchall()
-                unique_cves: set[str] = set()
-                for cr in cve_rows:
-                    try:
-                        cve_list = json.loads(cr["source_cves"] or "[]")
-                        if isinstance(cve_list, list):
-                            unique_cves.update(cve_list)
-                    except (TypeError, ValueError):
-                        pass
+            if not rows:
+                return []
 
-                # Count unique CWEs from raw_entries for those CVEs
-                cwe_count = 0
-                if unique_cves:
-                    placeholders = ",".join("?" for _ in unique_cves)
-                    cwe_count = conn.execute(
-                        f"SELECT COUNT(DISTINCT json_extract(payload, '$.cwe_id')) "
+            top_langs = [row["language"] for row in rows]
+
+            # Batch-1: collect all (language, source_cves) for top languages
+            placeholders = ",".join("?" for _ in top_langs)
+            cve_rows = conn.execute(
+                f"SELECT d.language, c.source_cves "
+                f"FROM github_languages_data AS d "
+                f"JOIN github_languages_cache AS c "
+                f"  ON c.owner = d.owner AND c.repo = d.repo "
+                f"WHERE d.language IN ({placeholders})",
+                tuple(top_langs),
+            ).fetchall()
+
+            lang_cves: dict[str, set[str]] = {lang: set() for lang in top_langs}
+            all_cves: set[str] = set()
+            for cr in cve_rows:
+                try:
+                    cve_list = json.loads(cr["source_cves"] or "[]")
+                    if isinstance(cve_list, list):
+                        lang_cves[cr["language"]].update(cve_list)
+                        all_cves.update(cve_list)
+                except (TypeError, ValueError):
+                    pass
+
+            # Batch-2: map all CVEs → CWE in one go
+            cve_to_cwe: dict[str, str] = {}
+            if all_cves:
+                batch_size = 500
+                cve_list = list(all_cves)
+                for i in range(0, len(cve_list), batch_size):
+                    batch = cve_list[i:i + batch_size]
+                    bp = ",".join("?" for _ in batch)
+                    raw_rows = conn.execute(
+                        f"SELECT cve_id, json_extract(payload, '$.cwe_id') AS cwe_id "
                         f"FROM raw_entries "
-                        f"WHERE cve_id IN ({placeholders}) "
+                        f"WHERE cve_id IN ({bp}) "
                         f"  AND json_extract(payload, '$.cwe_id') IS NOT NULL "
                         f"  AND json_extract(payload, '$.cwe_id') != ''",
-                        tuple(unique_cves),
-                    ).fetchone()[0]
+                        tuple(batch),
+                    ).fetchall()
+                    for rr in raw_rows:
+                        if rr["cwe_id"]:
+                            cve_to_cwe[rr["cve_id"]] = rr["cwe_id"]
 
+            results = []
+            for row in rows:
+                lang = row["language"]
+                cves = lang_cves.get(lang, set())
+                unique_cwes = {cve_to_cwe[c] for c in cves if c in cve_to_cwe}
                 results.append({
-                    "language": row["language"],
+                    "language": lang,
                     "total_bytes": int(row["total_bytes"]),
                     "repo_count": int(row["repo_count"]),
-                    "cve_count": len(unique_cves),
-                    "cwe_count": int(cwe_count),
+                    "cve_count": len(cves),
+                    "cwe_count": len(unique_cwes),
                 })
         return results
 

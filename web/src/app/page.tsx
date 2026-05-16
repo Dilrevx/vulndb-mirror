@@ -316,25 +316,33 @@ export default function Home() {
     async function loadGithubStats(): Promise<void> {
         setStatsLoading(true);
         setTopStatsLoading(true);
-        setCweStatsLoading(true);
+        // Fire-and-forget: CWE stats load asynchronously without blocking main panels
+        void loadCweStats();
         try {
-            const [d, l, tp, tl, eco, cwe] = await Promise.all([
+            const [d, l, tp, tl, eco] = await Promise.all([
                 apiGet<Record<string, number>>("/github-deps/stats").catch(() => null),
                 apiGet<Record<string, number>>("/github-languages/stats").catch(() => null),
                 apiGet<{ items: TopPackageItem[] }>("/github-deps/top-packages?limit=50").catch(() => null),
                 apiGet<{ items: TopLanguageItem[] }>("/github-languages/top-languages?limit=50").catch(() => null),
                 apiGet<{ items: string[] }>("/github-deps/ecosystems").catch(() => null),
-                apiGet<{ items: CweLanguageStatsItem[] }>("/github-languages/cwe-stats?limit=100").catch(() => null),
             ]);
             setDepsStats(d);
             setLangsStats(l);
             setTopPackages(tp?.items ?? null);
             setTopLanguages(tl?.items ?? null);
             setEcosystems(eco?.items ?? []);
-            setCweStats(cwe?.items ?? null);
         } finally {
             setStatsLoading(false);
             setTopStatsLoading(false);
+        }
+    }
+
+    async function loadCweStats(): Promise<void> {
+        setCweStatsLoading(true);
+        try {
+            const cwe = await apiGet<{ items: CweLanguageStatsItem[] }>("/github-languages/cwe-stats?limit=100").catch(() => null);
+            setCweStats(cwe?.items ?? null);
+        } finally {
             setCweStatsLoading(false);
         }
     }
@@ -452,6 +460,7 @@ export default function Home() {
                         onEcoChange={(eco) => { setTopEco(eco); void loadTopPackages(eco || undefined); }}
                         cweStats={cweStats}
                         cweStatsLoading={cweStatsLoading}
+                        loadCweStats={() => void loadCweStats()}
                     />
                 ) : (
                     <DebugTab
