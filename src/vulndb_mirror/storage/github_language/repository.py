@@ -419,13 +419,15 @@ class GitHubLanguagesRepository:
                     pass
 
             cve_to_cwe: dict[str, str] = {}
+            cwe_to_desc: dict[str, str] = {}
             batch_size = 500
             cve_list = list(all_cves)
             for i in range(0, len(cve_list), batch_size):
                 batch = cve_list[i:i + batch_size]
                 placeholders = ",".join("?" for _ in batch)
                 raw_rows = conn.execute(
-                    f"SELECT cve_id, json_extract(payload, '$.cwe_id') AS cwe_id "
+                    f"SELECT cve_id, json_extract(payload, '$.cwe_id') AS cwe_id, "
+                    f"       json_extract(payload, '$.cwe_description') AS cwe_description "
                     f"FROM raw_entries "
                     f"WHERE cve_id IN ({placeholders}) "
                     f"  AND json_extract(payload, '$.cwe_id') IS NOT NULL "
@@ -435,6 +437,8 @@ class GitHubLanguagesRepository:
                 for rr in raw_rows:
                     if rr["cwe_id"]:
                         cve_to_cwe[rr["cve_id"]] = rr["cwe_id"]
+                        if rr["cwe_description"] and rr["cwe_id"] not in cwe_to_desc:
+                            cwe_to_desc[rr["cwe_id"]] = rr["cwe_description"]
 
             # Aggregate: CWE → language → (total_bytes, repo_set)
             cwe_lang_bytes: dict[str, dict[str, int]] = {}
@@ -471,6 +475,7 @@ class GitHubLanguagesRepository:
                     })
                 results.append({
                     "cwe_id": cwe,
+                    "cwe_description": cwe_to_desc.get(cwe, ""),
                     "languages": lang_list,
                 })
 

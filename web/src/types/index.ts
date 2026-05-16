@@ -108,5 +108,6 @@ export type CweLanguageEntry = {
 };
 export type CweLanguageStatsItem = {
     cwe_id: string;
+    cwe_description?: string;
     languages: CweLanguageEntry[];
 };

@@ -246,7 +246,17 @@ export function GithubTab({
                                         const totalBytes = cwe.languages.reduce((s, l) => s + l.total_bytes, 0);
                                         return (
                                             <tr key={cwe.cwe_id} className="text-slate-700 hover:bg-slate-50 align-top">
-                                                <td className="py-1.5 pr-4 font-mono font-medium whitespace-nowrap">{cwe.cwe_id}</td>
+                                                <td className="py-1.5 pr-4 font-mono whitespace-nowrap">
+                                                    <span className="font-medium">{cwe.cwe_id}</span>
+                                                    {cwe.cwe_description && (
+                                                        <span
+                                                            className="ml-1.5 text-slate-500 truncate inline-block max-w-[12rem] align-bottom"
+                                                            title={cwe.cwe_description}
+                                                        >
+                                                            {cwe.cwe_description}
+                                                        </span>
+                                                    )}
+                                                </td>
                                                 <td className="py-1.5">
                                                     <div className="flex flex-wrap gap-x-2 gap-y-0.5">
                                                         {cwe.languages.map((l) => {
