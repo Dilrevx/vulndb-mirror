@@ -40,7 +40,7 @@ export type CheckpointsResp = {
     meta: Record<string, unknown>;
 };
 
-export type TabMode = "search" | "debug" | "github";
+export type TabMode = "search" | "debug" | "github" | "ghsa";
 export type TriMode = "all" | "yes" | "no";
 export type PoCRuleMode = "balanced" | "strict" | "loose";
 export type ChannelId = string;
@@ -110,4 +110,36 @@ export type CweLanguageStatsItem = {
     cwe_id: string;
     cwe_description?: string;
     languages: CweLanguageEntry[];
+};
+
+export type GhsaVersionRange = {
+    type: string;
+    introduced: string;
+    fixed: string;
+    last_affected: string;
+};
+
+export type GhsaAffectedPackage = {
+    ecosystem: string;
+    package_name: string;
+    version_ranges: GhsaVersionRange[];
+    versions: string[];
+};
+
+export type GhsaRecord = {
+    ghsa_id: string;
+    cve_ids: string[];
+    summary: string;
+    details: string;
+    cvss_score: number | null;
+    cvss_vector: string;
+    severity_type: string;
+    affected: GhsaAffectedPackage[];
+    references: Array<{ type: string; url: string }>;
+    cwe_ids: string[];
+    github_reviewed: boolean;
+    withdrawn: string | null;
+    published: string | null;
+    modified: string | null;
+    crawled_at: string;
 };
