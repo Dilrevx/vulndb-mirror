@@ -29,8 +29,8 @@ from vulndb_mirror.storage.github_language.repository import (
     GitHubLanguagesRepository,
     LanguagesQueueItem,
 )
-from vulndb_mirror.storage.raw.raw_models import now_iso
-from vulndb_mirror.storage.raw.repositories import RawRepository, SqliteRawRepository
+from vulndb_mirror.storage.cve.models import now_iso
+from vulndb_mirror.storage.cve.repository import CveRepository as RawRepository, SqliteCveRepository as SqliteRawRepository
 
 logger = logging.getLogger(__name__)
 

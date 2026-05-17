@@ -32,13 +32,16 @@ Bootstrap server:
 ```python
 from vulndb_mirror.config import CrawlerSettings
 from vulndb_mirror.server.api import create_app
-from vulndb_mirror.storage.ingest_service import RawIngestService
-from vulndb_mirror.storage.repository_factory import build_raw_repository
+from vulndb_mirror.storage.cve.aliyun_ingest import AliyunIngestService
+from vulndb_mirror.storage.cve.factory import build_cve_repository
 
 settings = CrawlerSettings()
-repository = build_raw_repository(settings)
-service = RawIngestService(settings.to_crawl_config(), repository)
-app = create_app(repository, service)
+repository = build_cve_repository(settings)
+service = AliyunIngestService(settings.to_crawl_config(), repository)
+app = create_app(
+    repositories={"aliyun": repository},
+    services={"aliyun": service},
+)
 ```
 
 Run:
@@ -67,10 +70,33 @@ npm run dev
 
 ## 3) Import map
 
-- Server: `vulndb_mirror.server.create_app`
-- Mirror config: `vulndb_mirror.config.CrawlerSettings`
-- Filter: `logic_vulns.filter.FilterPipeline`
-- Tracer: `logic_vulns.tracer.CalltraceExplorer`
+| Symbol | Path |
+|--------|------|
+| `create_app` | `vulndb_mirror.server.api` |
+| `CrawlerSettings` | `vulndb_mirror.config` |
+| `build_cve_repository` | `vulndb_mirror.storage.cve.factory` |
+| `AliyunIngestService` | `vulndb_mirror.storage.cve.aliyun_ingest` |
+| `CvelistV5IngestService` | `vulndb_mirror.storage.cve.cvelistv5_ingest` |
+| `GhsaIngestService` | `vulndb_mirror.storage.ghsa.ingest` |
+| `GhsaRepository` | `vulndb_mirror.storage.ghsa.repository` |
+| `FilterPipeline` | `logic_vulns.filter` |
+| `CalltraceExplorer` | `logic_vulns.tracer` |
+
+GHSA is an optional data source. To enable it, pass `ghsa_repo` and `ghsa_service` to `create_app`:
+
+```python
+from vulndb_mirror.storage.ghsa.ingest import GhsaIngestService
+from vulndb_mirror.storage.ghsa.repository import GhsaRepository
+
+ghsa_repo = GhsaRepository(db_path=settings.ghsa_sqlite_path or "./output/ghsa/ghsa.db")
+ghsa_service = GhsaIngestService(settings, ghsa_repo)
+app = create_app(
+    repositories={"aliyun": repository},
+    services={"aliyun": service},
+    ghsa_repo=ghsa_repo,
+    ghsa_service=ghsa_service,
+)
+```
 
 ## 4) Recommended target layout
 

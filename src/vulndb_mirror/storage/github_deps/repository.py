@@ -17,7 +17,7 @@ from typing import Iterable, Optional
 
 from vulndb_mirror.crawler.github.sbom import ParsedPackage
 from vulndb_mirror.crawler.github import RepoRef
-from vulndb_mirror.storage.raw.raw_models import now_iso
+from vulndb_mirror.storage.cve.models import now_iso
 
 logger = logging.getLogger(__name__)
 
