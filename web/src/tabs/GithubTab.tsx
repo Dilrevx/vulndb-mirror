@@ -199,7 +199,7 @@ export function GithubTab({
                                                 <div className="absolute right-1 top-0 bottom-0 w-px bg-slate-200 group-hover:bg-blue-400 transition-colors" />
                                             </div>
                                         </th>
-                                        <th className="pb-2 pr-4 font-medium flex-1">总字节</th>
+                                        <th className="pb-2 pr-4 font-medium flex-none w-20">总字节</th>
                                         <th className="pb-2 pr-4 font-medium flex-none w-14">仓库数</th>
                                         <th className="pb-2 pr-4 font-medium flex-none w-14">CVE 数</th>
                                         <th className="pb-2 font-medium flex-none w-14">CWE 数</th>
@@ -209,7 +209,7 @@ export function GithubTab({
                                     {topLangVirt.virtualizer.getVirtualItems().map((vRow) => {
                                         const item = topLanguages[vRow.index];
                                         return (
-                                            <tr key={vRow.key} data-index={vRow.index} className="flex absolute w-full text-slate-700 hover:bg-slate-50 border-b border-slate-100" style={{ transform: `translateY(${vRow.start}px)` }}>
+                                            <tr key={vRow.key} data-index={vRow.index} className="flex absolute text-slate-700 hover:bg-slate-50 border-b border-slate-100" style={{ transform: `translateY(${vRow.start}px)` }}>
                                                 <td className="py-1.5 pr-4 text-slate-400 flex-none w-8">{vRow.index + 1}</td>
                                                 <td className="py-1.5 pr-4 flex-none overflow-hidden" style={topLangResize.thStyle("lang")}>
                                                     <span className="flex items-center gap-1.5 min-w-0">
@@ -217,7 +217,7 @@ export function GithubTab({
                                                         <span className="font-medium truncate">{item.language}</span>
                                                     </span>
                                                 </td>
-                                                <td className="py-1.5 pr-4 font-mono text-slate-500 flex-1">{formatBytes(item.total_bytes)}</td>
+                                                <td className="py-1.5 pr-4 font-mono text-slate-500 flex-none w-20">{formatBytes(item.total_bytes)}</td>
                                                 <td className="py-1.5 pr-4 font-mono flex-none w-14">{item.repo_count}</td>
                                                 <td className="py-1.5 pr-4 font-mono flex-none w-14">{item.cve_count}</td>
                                                 <td className="py-1.5 font-mono flex-none w-14">{item.cwe_count}</td>
