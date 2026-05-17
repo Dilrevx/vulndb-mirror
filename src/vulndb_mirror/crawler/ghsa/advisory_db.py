@@ -88,18 +88,8 @@ class GhsaAdvisoryDbCrawler:
         advisories_root = self._repo_path / "advisories"
         if not advisories_root.exists():
             return []
-        paths: list[Path] = []
-        for review_dir in sorted(advisories_root.iterdir()):
-            if not review_dir.is_dir():
-                continue
-            for ecosystem_dir in sorted(review_dir.iterdir()):
-                if not ecosystem_dir.is_dir():
-                    continue
-                for ghsa_dir in sorted(ecosystem_dir.iterdir()):
-                    if not ghsa_dir.is_dir():
-                        continue
-                    paths.extend(sorted(ghsa_dir.glob("GHSA-*.json")))
-        return paths
+        # Layout: advisories/{github-reviewed|unreviewed}/{year}/{month}/{GHSA-id}/GHSA-id.json
+        return sorted(advisories_root.rglob("GHSA-*.json"))
 
     def _files_changed_since(self, since_commit: str) -> list[str]:
         result = subprocess.run(
