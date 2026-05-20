@@ -14,7 +14,7 @@
 | `cvelistv5`（默认）| [CVEProject/cvelistV5](https://github.com/CVEProject/cvelistV5) | 官方 CVE JSON 5.0，含 patch/reference URL |
 | `trickest_cve` | [trickest/cve](https://github.com/trickest/cve) | 含 PoC/GitHub 引用，通过 git clone/pull 同步 |
 | `aliyun` | [avd.aliyun.com](https://avd.aliyun.com) | 含 CVSS / CWE / severity，需 Playwright |
-| `ghsa` | [github/advisory-database](https://github.com/github/advisory-database) | GitHub 安全公告，OSV 格式，含受影响包/版本范围/CWE |
+| (GHSA) | [github/advisory-database](https://github.com/github/advisory-database) | GitHub 安全公告，OSV 格式，含受影响包/版本范围/CWE；`sync` 循环中自动执行，非 `--channel` 选项 |
 
 ## 安装
 
@@ -31,7 +31,7 @@ cp .env.example .env
 
 ```bash
 uv run vulndb-mirror sync                                          # 默认 cvelistv5，每小时一轮
-uv run vulndb-mirror sync --channel cvelistv5 trickest_cve ghsa   # 多 channel
+uv run vulndb-mirror sync --channel cvelistv5 trickest_cve   # 多 channel（GHSA 无需指定，自动同步）
 uv run vulndb-mirror sync --interval 7200                          # 自定义间隔（秒）
 ```
 
@@ -56,13 +56,13 @@ cd web && npm install && npm run dev:full
 ### `sync` — 定时全量同步（推荐）
 
 ```bash
-uv run vulndb-mirror sync [--channel cvelistv5 trickest_cve ghsa] [--interval 3600]
+uv run vulndb-mirror sync [--channel cvelistv5 trickest_cve] [--interval 3600]
                           [--patch-only] [--github-max-repos 500] [--github-max-seconds 1800]
 ```
 
 每轮循环：
 1. 对每个 CVE channel 执行增量同步
-2. 同步 GHSA（若 `ghsa` 在 channel 列表中）
+2. 同步 GHSA（始终自动执行，不受 `--channel` 影响）
 3. 从新 CVE 中提取 GitHub 仓库入队，运行 SBOM worker
 4. 同上，运行语言组成 worker
 5. 等待至下一个 `--interval` 秒，重复
