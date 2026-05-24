@@ -256,11 +256,12 @@ def create_app(
     @app.get("/github-languages/by-language")
     def github_languages_by_language(
         name: str = Query(..., min_length=1),
-        limit: int = Query(default=100, ge=1, le=500),
+        limit: int = Query(default=100, ge=1, le=2000),
+        offset: int = Query(default=0, ge=0),
     ):
         return {
             "items": _require_languages_repo().query_by_language(
-                language=name, limit=limit
+                language=name, limit=limit, offset=offset,
             )
         }
 

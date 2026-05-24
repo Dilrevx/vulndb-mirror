@@ -264,7 +264,7 @@ class GitHubLanguagesRepository:
         return _row_to_repo_dict(row, langs)
 
     def query_by_language(
-        self, language: str, *, limit: int = 100
+        self, language: str, *, limit: int = 100, offset: int = 0
     ) -> list[dict]:
         sql = (
             "SELECT d.owner, d.repo, d.language, d.bytes, "
@@ -274,10 +274,10 @@ class GitHubLanguagesRepository:
             "  ON c.owner = d.owner AND c.repo = d.repo "
             "WHERE d.language = ? "
             "ORDER BY d.bytes DESC, c.priority ASC "
-            "LIMIT ?"
+            "LIMIT ? OFFSET ?"
         )
         with self._connect() as conn:
-            rows = conn.execute(sql, (language, int(limit))).fetchall()
+            rows = conn.execute(sql, (language, int(limit), int(offset))).fetchall()
         results: list[dict] = []
         for row in rows:
             try:
