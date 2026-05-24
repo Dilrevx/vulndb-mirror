@@ -1,6 +1,6 @@
 # vulndb-mirror
 
-漏洞镜像库，包含两个独立 Python 包：
+漏洞镜像库，聚合多个公开漏洞数据源，提供统一的本地存储、REST API 和 Web 前端。包含两个独立 Python 包：
 
 - `vulndb_mirror`：镜像抓取 + storage + server + CLI
 - `logic_vulns`：分析逻辑（`filter` + `tracer`）
@@ -14,6 +14,7 @@
 | `cvelistv5`（默认）| [CVEProject/cvelistV5](https://github.com/CVEProject/cvelistV5) | 官方 CVE JSON 5.0，含 patch/reference URL |
 | `trickest_cve` | [trickest/cve](https://github.com/trickest/cve) | 含 PoC/GitHub 引用，通过 git clone/pull 同步 |
 | `aliyun` | [avd.aliyun.com](https://avd.aliyun.com) | 含 CVSS / CWE / severity，需 Playwright |
+| (GHSA) | [github/advisory-database](https://github.com/github/advisory-database) | GitHub 安全公告，OSV 格式，含受影响包/版本范围/CWE；`sync` 循环中自动执行，非 `--channel` 选项 |
 
 ## 安装
 
@@ -29,12 +30,12 @@ cp .env.example .env
 **一条命令启动全量同步（推荐放 tmux）：**
 
 ```bash
-uv run vulndb-mirror sync                          # 默认 cvelistv5，每小时一轮
-uv run vulndb-mirror sync --channel cvelistv5 trickest_cve   # 多 channel
-uv run vulndb-mirror sync --interval 7200          # 自定义间隔（秒）
+uv run vulndb-mirror sync                                          # 默认 cvelistv5，每小时一轮
+uv run vulndb-mirror sync --channel cvelistv5 trickest_cve   # 多 channel（GHSA 无需指定，自动同步）
+uv run vulndb-mirror sync --interval 7200                          # 自定义间隔（秒）
 ```
 
-每轮依次执行：① 同步 CVE 数据 → ② 补全 GitHub 依赖图 → ③ 补全 GitHub 语言组成。
+每轮依次执行：① 同步 CVE channels → ② 同步 GHSA → ③ 补全 GitHub 依赖图 → ④ 补全 GitHub 语言组成。
 
 **启动 API 服务：**
 
@@ -48,7 +49,7 @@ uv run vulndb-mirror api
 cd web && npm install && npm run dev:full
 ```
 
-默认会自动启动前端服务在 `3000` 端口和后端 API服务在 `8787` 端口。前端通过 Next.js 的反向代理（Rewrite）自动将 `/api/*` 的请求路由到后端。
+默认会自动启动前端服务在 `3000` 端口和后端 API 服务在 `8787` 端口。前端通过 Next.js 的反向代理（Rewrite）自动将 `/api/*` 的请求路由到后端。
 
 ## CLI
 
@@ -60,64 +61,79 @@ uv run vulndb-mirror sync [--channel cvelistv5 trickest_cve] [--interval 3600]
 ```
 
 每轮循环：
-1. 对每个 channel 执行增量 CVE 同步
-2. 从新 CVE 中提取 GitHub 仓库入队，运行 SBOM worker
-3. 同上，运行语言组成 worker
-4. 等待至下一个 `--interval` 秒，重复
+1. 对每个 CVE channel 执行增量同步
+2. 同步 GHSA（始终自动执行，不受 `--channel` 影响）
+3. 从新 CVE 中提取 GitHub 仓库入队，运行 SBOM worker
+4. 同上，运行语言组成 worker
+5. 等待至下一个 `--interval` 秒，重复
 
 `Ctrl-C` / `SIGTERM` 在当前阶段结束后优雅退出。
 
-### CVE 数据同步（单次）
+### `crawl-cve` — CVE 数据单次同步
 
 **cvelistv5 / trickest_cve channel**
 
 ```bash
-uv run vulndb-mirror crawl --channel cvelistv5
-uv run vulndb-mirror crawl --channel trickest_cve
-uv run vulndb-mirror crawl --channel cvelistv5 --full   # 强制全量重导入
+uv run vulndb-mirror crawl-cve --channel cvelistv5
+uv run vulndb-mirror crawl-cve --channel trickest_cve
+uv run vulndb-mirror crawl-cve --channel cvelistv5 --full   # 强制全量重导入
 ```
 
-**Aliyun channel**
+**aliyun channel**
 
 ```bash
-uv run vulndb-mirror crawl                  # 增量同步
-uv run vulndb-mirror gaps                   # 查看缺失页段
-uv run vulndb-mirror retry --pages 50 51    # 重试指定页
+uv run vulndb-mirror crawl-cve                  # 增量同步（默认 aliyun）
+uv run vulndb-mirror crawl-cve --start-page 50  # 从指定页开始
 ```
 
-默认 `SYNC_MODE=hybrid`：先从第 1 页做前段增量，跳过已有成功 checkpoint 的中间页，保留前 `HEAD_RECHECK_PAGES` 页强制重查。如需旧的线性行为：`SYNC_MODE=linear uv run vulndb-mirror crawl`
+默认 `SYNC_MODE=hybrid`：先从第 1 页做前段增量，跳过已有成功 checkpoint 的中间页，保留前 `HEAD_RECHECK_PAGES` 页强制重查。如需旧的线性行为：`SYNC_MODE=linear uv run vulndb-mirror crawl-cve`
 
-### GitHub 缓存服务（独立长驻，可替代 `sync`）
+> `crawl` 是 `crawl-cve` 的隐藏别名，保持向后兼容。
 
-对 CVE 引用的 GitHub 仓库调用 GitHub API，将依赖图（SBOM）和语言组成缓存到本地。需要设置 `GITHUB_TOKEN`（PAT，5000 req/h，两个服务共享配额）。
-
-| 服务 | 命令 | 数据内容 |
-|------|------|----------|
-| 依赖图 | `github-deps` | SBOM 依赖包列表，支持反查"哪些 CVE 影响某个包" |
-| 语言组成 | `github-languages` | 各语言字节数，支持反查"哪些仓库用某语言编写" |
+### `crawl-ghsa` — GHSA 单次同步
 
 ```bash
-uv run vulndb-mirror github-deps run
-uv run vulndb-mirror github-languages run
+uv run vulndb-mirror crawl-ghsa          # 增量同步（自动 git pull + diff）
+uv run vulndb-mirror crawl-ghsa --full   # 强制全量重导入
+```
 
-# 两个服务支持相同的选项
+首次运行会 shallow-clone `github/advisory-database` 到 `GHSA_DATA_DIR`，后续运行通过 git diff 只处理变动文件。
+
+### `gaps` — 查看 aliyun 缺失页段
+
+```bash
+uv run vulndb-mirror gaps
+```
+
+### `retry` — 重试 aliyun 指定页
+
+```bash
+uv run vulndb-mirror retry --pages 50 51 52
+```
+
+### `github-deps` — GitHub 依赖图缓存服务
+
+```bash
+uv run vulndb-mirror github-deps run    # 启动长驻 worker
+uv run vulndb-mirror github-deps stats  # 查看缓存统计
+```
+
+### `github-languages` — GitHub 语言组成缓存服务
+
+```bash
+uv run vulndb-mirror github-languages run    # 启动长驻 worker
+uv run vulndb-mirror github-languages stats  # 查看缓存统计
+```
+
+两个服务支持相同的选项：
+
+```
 --channel cvelistv5 trickest_cve   # 扫描多个 channel（默认 cvelistv5）
 --patch-only                        # 只处理 patch_url 中的高优先级仓库
 --discover-interval 1800            # 发现间隔秒数（默认 3600）
 ```
 
-**服务循环**：启动 → 扫描近 30 天 CVE 入队 → 持续拉取（受 hourly budget 限速）→ 队列清空后补充历史数据 → 每隔 `--discover-interval` 秒重复。
-
-**缓存时效**：无固定过期时间。仓库被抓取后保持 `fetched` 状态；当新 CVE 再次引用同一仓库时，自动重置为 `pending` 触发重新拉取。`skip_404` / `skip_403` 是终态，不会被重置。
-
-**优先级**：`priority=0` 为 `patch_urls` 中的仓库（高价值），`priority=1` 为仅在 `references` 中出现的仓库。
-
-```bash
-uv run vulndb-mirror github-deps stats
-uv run vulndb-mirror github-languages stats
-```
-
-### API 服务
+### `api` — 启动 API 服务
 
 ```bash
 uv run vulndb-mirror api
@@ -144,6 +160,10 @@ GIT_PROXY=socks5://127.0.0.1:1080   # 可选，git 操作代理
 # cvelistv5 channel
 CVELISTV5_DATA_DIR=./output/cvelistv5
 
+# GHSA channel
+GHSA_DATA_DIR=./output/ghsa          # advisory-database clone 目录
+GHSA_SQLITE_PATH=                    # 留空则使用 GHSA_DATA_DIR/ghsa.db
+
 # GitHub 缓存（两个服务各自独立配置）
 GITHUB_SBOM_CONCURRENCY=4
 GITHUB_SBOM_HOURLY_BUDGET=4500
@@ -169,6 +189,15 @@ RAWDB_API_PORT=8787
 | `GET` | `/raw/{cve_id}` | 查询单条 CVE（`?channel=cvelistv5`） |
 | `GET` | `/raw` | 分页查询（`q`, `modified_from`, `has_patch`, `page`, `page_size`, `channel`） |
 
+### GHSA 安全公告
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/ghsa/stats` | 统计信息（条目数、生态系统分布） |
+| `GET` | `/ghsa/by-cve/{cve_id}` | 通过 CVE ID 查关联的 GHSA 条目 |
+| `GET` | `/ghsa/{ghsa_id}` | 查询单条 GHSA |
+| `GET` | `/ghsa` | 分页查询（`ecosystem`, `package_name`, `page`, `page_size`） |
+
 ### GitHub 依赖图
 
 | 方法 | 路径 | 说明 |
@@ -193,10 +222,43 @@ RAWDB_API_PORT=8787
 | `POST` | `/ops/aliyun/retry` | 重试指定页 |
 | `GET` | `/ops/aliyun/checkpoints` | checkpoint 状态 |
 | `GET` | `/ops/aliyun/gaps` | 缺失页段 |
+| `POST` | `/ops/ghsa/sync` | 触发 GHSA 增量同步（`?full=false`） |
 | `POST` | `/ops/github-deps/discover` | 从 CVE 提取仓库入队（`?channel=&since_iso=&limit=`） |
 | `POST` | `/ops/github-deps/sync` | 拉取 SBOM 队列（`?max_repos=&max_seconds=&priority=`） |
 | `POST` | `/ops/github-languages/discover` | 从 CVE 提取仓库入队（语言缓存） |
 | `POST` | `/ops/github-languages/sync` | 拉取语言队列（`?max_repos=&max_seconds=&priority=`） |
+
+## GitHub Cache 状态生命周期
+
+`sync` 命令在 CVE 抓取完成后会触发两阶段 GitHub 数据缓存：
+
+1. **Discover** — 从近期更新的 CVE 条目中提取 GitHub repo 引用并入队
+2. **Worker** — 按 `(priority ASC, enqueued_at ASC)` 顺序消费队列，抓取 SBOM/languages
+
+### `github_sbom_cache` / `github_languages_cache` 状态流转
+
+| 状态 | 含义 | 触发条件 | `next_batch` 是否挑选 | `enqueue_many` 行为 |
+|------|------|----------|----------------------|---------------------|
+| `pending` | 等待处理 | 首次发现或 `error`/`fetched` 遇到新 CVE | **是** | 保持 `pending`（不更新 `enqueued_at`） |
+| `fetched` | 已成功抓取 | HTTP 200 / 304 | 否 | 有新 CVE → 重置 `pending` 并更新 `enqueued_at`；否则保持不动 |
+| `skip_404` | repo 不存在或未开启 SBOM | HTTP 404 | 否 | **永久保持**，不再重试 |
+| `skip_403` | private / SBOM 功能禁用 | HTTP 403 | 否 | **永久保持**，不再重试 |
+| `error` | 瞬时错误 | HTTP 5xx / 网络异常 / 解析失败 | 否 | 有新 CVE → 重置 `pending` 并更新 `enqueued_at`；否则保持不动 |
+
+### 关键设计要点
+
+- **不重复拉取**：已 `fetched` 的 repo 只在有新 CVE 引用时才会重新检查 BOM 更新
+- **优先队列**：`priority=0`（patch URL 来源）始终先于 `priority=1`（reference 来源）处理
+- **增量 discover**：sync 循环在第一轮全量扫描后，后续轮次仅扫描增量 CVE 条目（`since_iso`）
+- **`enqueued_at` 更新**：repo 因新 CVE 重新入队时 `enqueued_at` 会更新，使其排到同优先级队尾
+- **404/403 永久跳过**：这些状态表示 repo 本质不可达，不会浪费 API budget 重试
+- **error 可重试**：500/网络异常等瞬时错误，当引用了该 repo 的新 CVE 出现时给予重试机会
+
+### SBOM 与 Languages 的 304 行为差异
+
+GitHub `/languages` 端点返回 `ETag`，支持 `If-None-Match` 条件请求，缓存命中时返回 **304 Not Modified**，不消耗 API quota。
+
+GitHub `/dependency-graph/sbom` 端点**不返回 `ETag`**，每次请求均为完整 **200 OK** 响应，始终消耗 API quota。这是 GitHub API 的平台限制，不影响队列推进正确性，但意味着 SBOM 缓存的刷新会比 languages 慢。
 
 ## Web 前端
 
@@ -209,8 +271,16 @@ npm install
 npm run dev
 ```
 
+前端功能：
+- 固定左侧过滤栏，含汇总统计
+- 列表内联详情卡片
+- 右侧抽屉展示完整 CVE 详情
+- 直链跳转详情 / 引用 / patch URL
+- 可配置的 PoC 状态启发式标注
+- 日期过滤收起在高级选项中
+
 ## 参考文档
 
-- `docs/server-frontend-migration.md`：前后端分离迁移记录
-- `docs/rawdb-package-evaluation.md`：存储方案评估
 - `docs/usage.md`：详细使用说明
+- `docs/server-frontend-migration.md`：前后端分离迁移指南
+- `docs/rawdb-package-evaluation.md`：存储方案评估

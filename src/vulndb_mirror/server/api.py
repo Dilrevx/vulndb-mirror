@@ -13,9 +13,9 @@ from vulndb_mirror.storage.github_language.ingest_service import (
     GithubLanguagesIngestService,
 )
 from vulndb_mirror.storage.github_language.repository import GitHubLanguagesRepository
-from vulndb_mirror.storage.raw.ingest_service import RawIngestService
-from vulndb_mirror.storage.raw.raw_models import RetryRequest
-from vulndb_mirror.storage.raw.repositories import RawRepository
+from vulndb_mirror.storage.cve.aliyun_ingest import AliyunIngestService
+from vulndb_mirror.storage.cve.models import RetryRequest
+from vulndb_mirror.storage.cve.repository import CveRepository as RawRepository
 
 
 def create_app(
@@ -26,6 +26,8 @@ def create_app(
     sbom_service: Optional[GithubSbomIngestService] = None,
     languages_repo: Optional[GitHubLanguagesRepository] = None,
     languages_service: Optional[GithubLanguagesIngestService] = None,
+    ghsa_repo=None,
+    ghsa_service=None,
 ) -> FastAPI:
     channel_names = list(repositories.keys())
 
@@ -100,7 +102,7 @@ def create_app(
         start_page: int | None = Query(default=None, ge=1),
     ):
         svc = _resolve_service(channel)
-        if isinstance(svc, RawIngestService):
+        if isinstance(svc, AliyunIngestService):
             result = svc.crawl_incremental(start_page=start_page)
         else:
             result = svc.sync()
@@ -298,6 +300,54 @@ def create_app(
             max_seconds=max_seconds,
             priority=priority,
         )
+        return result.model_dump()
+
+    # ---- GHSA advisory database -----------------------------------------
+
+    def _require_ghsa_repo():
+        if ghsa_repo is None:
+            raise HTTPException(status_code=503, detail="ghsa not configured")
+        return ghsa_repo
+
+    def _require_ghsa_service():
+        if ghsa_service is None:
+            raise HTTPException(status_code=503, detail="ghsa not configured")
+        return ghsa_service
+
+    @app.get("/ghsa/stats")
+    def ghsa_stats():
+        return _require_ghsa_repo().stats()
+
+    @app.get("/ghsa/by-cve/{cve_id}")
+    def get_ghsa_by_cve(cve_id: str):
+        items = _require_ghsa_repo().get_by_cve_id(cve_id)
+        return {"items": [i.model_dump() for i in items]}
+
+    @app.get("/ghsa")
+    def query_ghsa(
+        ecosystem: Optional[str] = Query(default=None),
+        package_name: Optional[str] = Query(default=None),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=50, ge=1, le=500),
+    ):
+        total, items = _require_ghsa_repo().query(
+            ecosystem=ecosystem,
+            package_name=package_name,
+            page=page,
+            page_size=page_size,
+        )
+        return {"total": total, "items": [i.model_dump() for i in items]}
+
+    @app.get("/ghsa/{ghsa_id}")
+    def get_ghsa(ghsa_id: str):
+        item = _require_ghsa_repo().get(ghsa_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="not found")
+        return item.model_dump()
+
+    @app.post("/ops/ghsa/sync")
+    def ops_ghsa_sync(full: bool = False):
+        result = _require_ghsa_service().sync(full=full)
         return result.model_dump()
 
     return app

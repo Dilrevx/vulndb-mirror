@@ -1,23 +1,40 @@
-from .raw.file_storage import CrawlStorage
-from .raw.ingest_service import RawIngestService
-from .raw.raw_models import PageCheckpoint, PageGap, RawQueryResult
-from .raw.repositories import (
-    DualWriteRawRepository,
-    FileRawRepository,
-    RawRepository,
-    SqliteRawRepository,
+from .cve.file_storage import CrawlStorage
+from .cve.aliyun_ingest import AliyunIngestService
+from .cve.models import PageCheckpoint, PageGap, CveQueryResult
+from .cve.repository import (
+    DualWriteCveRepository,
+    FileCveRepository,
+    CveRepository,
+    SqliteCveRepository,
 )
-from .raw.repository_factory import build_raw_repository
+from .cve.factory import build_cve_repository
+
+# backward-compat aliases
+RawIngestService = AliyunIngestService
+RawRepository = CveRepository
+FileRawRepository = FileCveRepository
+SqliteRawRepository = SqliteCveRepository
+DualWriteRawRepository = DualWriteCveRepository
+RawQueryResult = CveQueryResult
+build_raw_repository = build_cve_repository
 
 __all__ = [
     "CrawlStorage",
+    "CveRepository",
+    "FileCveRepository",
+    "SqliteCveRepository",
+    "DualWriteCveRepository",
+    "AliyunIngestService",
+    "PageCheckpoint",
+    "PageGap",
+    "CveQueryResult",
+    "build_cve_repository",
+    # backward-compat
     "RawRepository",
     "FileRawRepository",
     "SqliteRawRepository",
     "DualWriteRawRepository",
     "RawIngestService",
-    "PageCheckpoint",
-    "PageGap",
     "RawQueryResult",
     "build_raw_repository",
 ]

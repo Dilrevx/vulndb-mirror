@@ -24,12 +24,15 @@ from vulndb_mirror.storage.github_language.ingest_service import (
     GithubLanguagesIngestService,
 )
 from vulndb_mirror.storage.github_language.repository import GitHubLanguagesRepository
-from vulndb_mirror.storage.raw.ingest_service import RawIngestService
-from vulndb_mirror.storage.raw.repositories import RawRepository
-from vulndb_mirror.storage.raw.raw_models import now_iso
-from vulndb_mirror.storage.raw.repository_factory import build_raw_repository
-from vulndb_mirror.storage.raw.trickest_ingest_service import TrickestIngestService
-from vulndb_mirror.storage.raw.cvelistv5_ingest_service import CvelistV5IngestService
+from vulndb_mirror.storage.cve.aliyun_ingest import AliyunIngestService
+from vulndb_mirror.storage.cve.repository import CveRepository as RawRepository
+from vulndb_mirror.storage.cve.models import now_iso
+from vulndb_mirror.storage.cve.factory import build_cve_repository as build_raw_repository
+from vulndb_mirror.storage.cve.trickest_ingest import TrickestIngestService
+from vulndb_mirror.storage.cve.cvelistv5_ingest import CvelistV5IngestService
+from vulndb_mirror.crawler.ghsa.advisory_db import GhsaAdvisoryDbCrawler
+from vulndb_mirror.storage.ghsa.repository import GhsaRepository
+from vulndb_mirror.storage.ghsa.ingest import GhsaIngestService
 
 
 def _setup_logging(log_dir: str | None) -> None:
@@ -57,24 +60,42 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Vulnerability DB mirror tools")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    crawl = sub.add_parser("crawl", help="run incremental crawl / sync into raw storage")
-    crawl.add_argument(
+    crawl_cve = sub.add_parser("crawl-cve", help="crawl CVE data (aliyun / cvelistv5 / trickest_cve)")
+    crawl_cve.add_argument(
         "--channel",
         default=None,
         choices=["aliyun", "trickest_cve", "cvelistv5"],
         help="data channel to crawl (default: value of CHANNEL env / 'aliyun')",
     )
-    crawl.add_argument(
+    crawl_cve.add_argument(
         "--start-page",
         type=int,
         default=None,
         help="(aliyun channel) start from this list page",
     )
-    crawl.add_argument(
+    crawl_cve.add_argument(
         "--full",
         action="store_true",
         default=False,
         help="(trickest_cve channel) re-process all files ignoring previous sync state",
+    )
+
+    crawl = sub.add_parser("crawl", help=argparse.SUPPRESS)
+    crawl.add_argument(
+        "--channel",
+        default=None,
+        choices=["aliyun", "trickest_cve", "cvelistv5"],
+        help=argparse.SUPPRESS,
+    )
+    crawl.add_argument("--start-page", type=int, default=None, help=argparse.SUPPRESS)
+    crawl.add_argument("--full", action="store_true", default=False, help=argparse.SUPPRESS)
+
+    crawl_ghsa = sub.add_parser("crawl-ghsa", help="sync GitHub Advisory Database (GHSA)")
+    crawl_ghsa.add_argument(
+        "--full",
+        action="store_true",
+        default=False,
+        help="re-process all files ignoring previous sync state",
     )
 
     retry = sub.add_parser("retry", help="retry explicit pages (aliyun channel)")
@@ -85,7 +106,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sync = sub.add_parser(
         "sync",
-        help="timed loop: crawl CVE data → github-deps → github-languages (suitable for tmux)",
+        help="timed loop: crawl CVE data → GHSA → github-deps → github-languages (suitable for tmux)",
     )
     sync.add_argument(
         "--channel",
@@ -270,6 +291,19 @@ def _build_languages_service(
     )
 
 
+def _resolve_ghsa_sqlite_path(settings: CrawlerSettings) -> str:
+    if settings.ghsa_sqlite_path:
+        return settings.ghsa_sqlite_path
+    return str(Path(settings.ghsa_data_dir) / "ghsa.db")
+
+
+def _build_ghsa_service(settings: CrawlerSettings) -> GhsaIngestService:
+    ghsa_repo = GhsaRepository(db_path=_resolve_ghsa_sqlite_path(settings))
+    cfg = settings.to_crawl_config()
+    cfg.data_dir = settings.ghsa_data_dir
+    return GhsaIngestService(cfg, ghsa_repo)
+
+
 def _make_sync_complete_hook(
     sbom_service: GithubSbomIngestService,
     settings: CrawlerSettings,
@@ -316,7 +350,7 @@ def main() -> None:
             "cvelistv5": cvelistv5_repo,
         }
         services = {
-            "aliyun": RawIngestService(settings.to_crawl_config(), aliyun_repo),
+            "aliyun": AliyunIngestService(settings.to_crawl_config(), aliyun_repo),
             "trickest_cve": TrickestIngestService(trickest_config, trickest_repo),
             "cvelistv5": CvelistV5IngestService(cv5_config, cvelistv5_repo),
         }
@@ -341,6 +375,8 @@ def main() -> None:
             crawler=GitHubLanguagesCrawler(github_token=settings.github_token),
         )
 
+        ghsa_service = _build_ghsa_service(settings)
+
         app = create_app(
             repositories,
             services,
@@ -348,6 +384,8 @@ def main() -> None:
             sbom_service=sbom_service,
             languages_repo=languages_repo,
             languages_service=languages_service,
+            ghsa_repo=ghsa_service.repository,
+            ghsa_service=ghsa_service,
         )
         uvicorn.run(
             app,
@@ -495,11 +533,20 @@ def main() -> None:
                         cfg.data_dir = settings.cvelistv5_data_dir
                         CvelistV5IngestService(cfg, raw_repos[ch]).sync(full=False)
                     else:
-                        RawIngestService(settings.to_crawl_config(), raw_repos[ch]).crawl_incremental()
+                        AliyunIngestService(settings.to_crawl_config(), raw_repos[ch]).crawl_incremental()
                 except Exception as exc:
                     logger.error("sync: crawl channel=%s failed: %s", ch, exc)
 
-            # Phase 2: GitHub deps (discover + worker)
+            # Phase 2: GHSA sync
+            if not stop.is_set():
+                logger.info("sync: ghsa sync")
+                try:
+                    ghsa_service = _build_ghsa_service(settings)
+                    ghsa_service.sync(full=False)
+                except Exception as exc:
+                    logger.error("sync: ghsa sync failed: %s", exc)
+
+            # Phase 3: GitHub deps (discover + worker)
             if not stop.is_set():
                 logger.info("sync: github-deps discover + worker")
                 try:
@@ -517,7 +564,7 @@ def main() -> None:
                 except Exception as exc:
                     logger.error("sync: github-deps phase failed: %s", exc)
 
-            # Phase 3: GitHub languages (discover + worker)
+            # Phase 4: GitHub languages (discover + worker)
             if not stop.is_set():
                 logger.info("sync: github-languages discover + worker")
                 try:
@@ -543,8 +590,15 @@ def main() -> None:
         logger.info("sync: stopped")
         return
 
+    # --- Crawl GHSA ----------------------------------------------------------
+    if args.command == "crawl-ghsa":
+        ghsa_service = _build_ghsa_service(settings)
+        result = ghsa_service.sync(full=args.full)
+        print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
+        return
+
     # --- Crawl ---------------------------------------------------------------
-    if args.command == "crawl" and channel == "trickest_cve":
+    if args.command in ("crawl-cve", "crawl") and channel == "trickest_cve":
         repository = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
         trickest_config = settings.to_crawl_config()
         trickest_config.data_dir = settings.trickest_data_dir
@@ -562,7 +616,7 @@ def main() -> None:
         print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
         return
 
-    if args.command == "crawl" and channel == "cvelistv5":
+    if args.command in ("crawl-cve", "crawl") and channel == "cvelistv5":
         repository = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
         cv5_config = settings.to_crawl_config()
         cv5_config.data_dir = settings.cvelistv5_data_dir
@@ -582,9 +636,9 @@ def main() -> None:
 
     # --- Aliyun channel (default) --------------------------------------------
     repository = build_raw_repository(settings)
-    service = RawIngestService(settings.to_crawl_config(), repository)
+    service = AliyunIngestService(settings.to_crawl_config(), repository)
 
-    if args.command == "crawl":
+    if args.command in ("crawl-cve", "crawl"):
         result = service.crawl_incremental(start_page=args.start_page)
         print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
         return

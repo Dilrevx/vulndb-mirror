@@ -1,8 +1,8 @@
 """Data models for the Aliyun AVD crawler.
 
-:class:`RawAVDEntry`  – intermediate struct populated by the crawler from HTML.
-:class:`AVDCveEntry`  – final output struct that serialises to the route-hacker
-                        YAML schema (matches CVE-2021-22113.yaml structure).
+:class:`CveRecord`       – intermediate struct populated by the crawler from HTML.
+:class:`EnrichedCveEntry` – final output struct that serialises to the route-hacker
+                            YAML schema (matches CVE-2021-22113.yaml structure).
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 
-class RawAVDEntry(BaseModel):
+class CveRecord(BaseModel):
     """Raw data scraped from the AVD list + detail pages before normalisation."""
 
     cve_id: str = Field(..., description="CVE identifier, e.g. CVE-2024-12345")
@@ -88,7 +88,7 @@ class CallTraceData(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class AVDCveEntry(BaseModel):
+class EnrichedCveEntry(BaseModel):
     """Output CVE entry serialised to route-hacker YAML schema.
 
     Field names intentionally match the existing YAML keys so that
@@ -163,8 +163,8 @@ class AVDCveEntry(BaseModel):
     # -------------------------------------------------------------------------
 
     @classmethod
-    def from_raw(cls, raw: RawAVDEntry) -> "AVDCveEntry":
-        """Create a minimal :class:`AVDCveEntry` from a :class:`RawAVDEntry`."""
+    def from_raw(cls, raw: CveRecord) -> "EnrichedCveEntry":
+        """Create a minimal :class:`EnrichedCveEntry` from a :class:`CveRecord`."""
         patch_url = raw.patch_urls[0] if raw.patch_urls else ""
         return cls(
             CVE=raw.cve_id,

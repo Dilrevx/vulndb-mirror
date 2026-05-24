@@ -1,68 +1,73 @@
-# Usage
+# 使用说明
 
-## Quick Start
+## 快速开始
 
-1. Install dependencies:
+1. 安装依赖：
 
 ```bash
 uv sync
-uv run playwright install chromium   # aliyun channel only
+uv run playwright install chromium   # 仅 aliyun channel 需要
 ```
 
-2. Prepare env:
+2. 准备环境变量：
 
 ```bash
 cp .env.example .env
+# 编辑 .env，至少填写 GITHUB_TOKEN
 ```
 
-3. Run crawler:
+3. 运行爬虫：
 
 ```bash
-# Aliyun channel (default)
-uv run vulndb-mirror crawl
+# cvelistv5 channel（默认）
+uv run vulndb-mirror crawl-cve --channel cvelistv5
 
-# Trickest CVE channel
-uv run vulndb-mirror crawl --channel trickest_cve
+# aliyun channel
+uv run vulndb-mirror crawl-cve
+
+# GHSA channel
+uv run vulndb-mirror crawl-ghsa
+
+# 全量同步（推荐，含所有 channel + GitHub 缓存）
+uv run vulndb-mirror sync
 ```
 
 ---
 
-## Channel: aliyun (default)
+## Channel: cvelistv5（默认）
 
-Scrapes [avd.aliyun.com](https://avd.aliyun.com) via Playwright.  
-Enriched fields: CVSS score/vector, CWE, severity, published/modified dates.
+从 [CVEProject/cvelistV5](https://github.com/CVEProject/cvelistV5) Git 仓库同步官方 CVE JSON 5.0 数据，**不需要 Playwright**。  
+主要字段：description、affected products、patch/reference URL。  
+数据写入 `CVELISTV5_DATA_DIR`（默认 `./output/cvelistv5/`）。
 
-### Crawl incremental raw data
+### 首次同步
 
 ```bash
-uv run vulndb-mirror crawl
-uv run vulndb-mirror crawl --start-page 50
+uv run vulndb-mirror crawl-cve --channel cvelistv5
 ```
 
-默认 `SYNC_MODE=hybrid`，会执行 `head_incremental`：
+首次运行会 `git clone` 仓库到 `output/cvelistv5/cvelistv5_repo/`，然后全量导入所有 CVE 文件。
 
-1. `head_incremental`：从第 1 页开始按 `SINCE` 做增量抓取（命中旧数据后停止）。
-2. `head` 阶段默认会跳过已成功 checkpoint 的中间页（可通过 `HEAD_SKIP_OK_PAGES` 控制），并强制重查前 `HEAD_RECHECK_PAGES` 页。
+### 增量同步
 
-这会复用已有 `page_checkpoints` 与历史元信息，不需要重跑历史结果。
-如果未设置 `SINCE`，会自动回退到上次保存的 `last_seen_date` 作为前段增量阈值。
-
-如果需要保持旧行为（单段线性）：
+再次执行同一条命令即为增量模式——自动对比上次同步的 git commit hash，只处理变动文件：
 
 ```bash
-SYNC_MODE=linear uv run vulndb-mirror crawl
+uv run vulndb-mirror crawl-cve --channel cvelistv5
 ```
 
-### Show missing/failed page ranges
+### 强制全量重导入
 
 ```bash
-uv run vulndb-mirror gaps
+uv run vulndb-mirror crawl-cve --channel cvelistv5 --full
 ```
 
-### Retry specific pages
+### 相关环境变量
 
-```bash
-uv run vulndb-mirror retry --pages 50 51 52
+```env
+CVELISTV5_DATA_DIR=./output/cvelistv5   # 数据目录，默认值
+GIT_CLONE_VIA_SSH=false                  # true = 使用 SSH 协议
+GIT_PROXY=socks5://127.0.0.1:1080        # 可选，git 操作走代理
 ```
 
 ---
@@ -71,61 +76,155 @@ uv run vulndb-mirror retry --pages 50 51 52
 
 从 [trickest/cve](https://github.com/trickest/cve) Git 仓库同步 CVE 数据，**不需要 Playwright**。  
 主要字段：description、affected products、PoC references（GitHub 链接列表）。  
-数据写入独立目录 `./output/trickest_cve/`，与 aliyun 数据完全隔离。
+数据写入独立目录 `./output/trickest_cve/`，与其他 channel 数据完全隔离。
 
-### First sync（首次运行，clone 仓库 + 全量导入）
+### 首次同步
 
 ```bash
-uv run vulndb-mirror crawl --channel trickest_cve
+uv run vulndb-mirror crawl-cve --channel trickest_cve
 ```
 
 首次运行会：
 1. `git clone https://github.com/trickest/cve.git` 到 `output/trickest_cve/trickest_repo/`
 2. 遍历所有年份目录下的 `CVE-*.md` 文件（约数十万条）
-3. 每条解析为 `RawAVDEntry` 存入 storage
+3. 每条解析为 `CveRecord` 存入 storage
 
-### Incremental sync（增量同步）
+### 增量同步
 
 再次执行同一条命令即为增量模式——自动对比上次同步的 git commit hash，只处理变动文件：
 
 ```bash
-uv run vulndb-mirror crawl --channel trickest_cve
+uv run vulndb-mirror crawl-cve --channel trickest_cve
 ```
 
-### Force full re-sync（强制全量重导入）
+### 强制全量重导入
 
 ```bash
-uv run vulndb-mirror crawl --channel trickest_cve --full
+uv run vulndb-mirror crawl-cve --channel trickest_cve --full
 ```
 
 ### 相关环境变量
 
 ```env
 TRICKEST_DATA_DIR=./output/trickest_cve   # 数据目录，默认值
-GIT_CLONE_VIA_SSH=false                   # true = 使用 git@github.com SSH 协议
-GIT_PROXY=socks5://127.0.0.1:1080         # 可选，git 操作走代理（HTTPS channel 有效）
-SINCE=2023-01-01                          # 按年份过滤，只导入 >= 该年份的 CVE
+GIT_CLONE_VIA_SSH=false                    # true = 使用 SSH 协议
+GIT_PROXY=socks5://127.0.0.1:1080          # 可选，git 操作走代理
+SINCE=2023-01-01                           # 按年份过滤，只导入 >= 该年份的 CVE
 ```
 
 ---
 
-## Start API service
+## Channel: aliyun
+
+抓取 [avd.aliyun.com](https://avd.aliyun.com)，通过 Playwright 渲染页面。  
+丰富字段：CVSS score/vector、CWE、severity、published/modified dates。  
+数据写入 `DATA_DIR`（默认 `./output/aliyun_cve/`）。
+
+### 增量抓取
+
+```bash
+uv run vulndb-mirror crawl-cve
+uv run vulndb-mirror crawl-cve --start-page 50
+```
+
+默认 `SYNC_MODE=hybrid`，会执行 `head_incremental`：
+
+1. `head_incremental`：从第 1 页开始按 `SINCE` 做增量抓取（命中旧数据后停止）。
+2. `head` 阶段默认会跳过已成功 checkpoint 的中间页（可通过 `HEAD_SKIP_OK_PAGES` 控制），并强制重查前 `HEAD_RECHECK_PAGES` 页。
+
+这会复用已有 `page_checkpoints` 与历史元信息，不需要重跑历史结果。  
+如果未设置 `SINCE`，会自动回退到上次保存的 `last_seen_date` 作为前段增量阈值。
+
+如果需要保持旧行为（单段线性）：
+
+```bash
+SYNC_MODE=linear uv run vulndb-mirror crawl-cve
+```
+
+### 查看缺失/失败页段
+
+```bash
+uv run vulndb-mirror gaps
+```
+
+### 重试指定页
+
+```bash
+uv run vulndb-mirror retry --pages 50 51 52
+```
+
+### 相关环境变量
+
+```env
+MAX_PAGES=200
+PAGE_CONCURRENCY=4
+SYNC_MODE=hybrid
+HEAD_SKIP_OK_PAGES=true
+HEAD_RECHECK_PAGES=10
+DATA_DIR=./output/aliyun_cve
+RAWDB_STORAGE_BACKEND=dual
+SINCE=2023-01-01   # 可选，前段增量阈值
+```
+
+---
+
+## Channel: ghsa
+
+从 [github/advisory-database](https://github.com/github/advisory-database) 同步 GitHub 安全公告（GHSA），**不需要 Playwright**。  
+格式为 OSV JSON，每条公告一个文件。  
+主要字段：`ghsa_id`、`cve_ids`（通过 aliases 字段关联）、`summary`、`details`（Markdown）、`affected`（生态系统 + 包名 + 版本范围）、`references`（含 FIX/ADVISORY 等类型）、`cwe_ids`、`github_reviewed`、`withdrawn`。  
+数据写入 `GHSA_DATA_DIR`（默认 `./output/ghsa/`），SQLite 包含 3 张表：`ghsa_entries`、`ghsa_cve_aliases`（CVE 反查）、`ghsa_affected`（生态系统/包名查询）。
+
+### 首次同步
+
+```bash
+uv run vulndb-mirror crawl-ghsa
+```
+
+首次运行会 shallow-clone `github/advisory-database` 到 `GHSA_DATA_DIR/advisory-database/`，然后全量导入所有 `.json` 文件。
+
+### 增量同步
+
+再次执行同一条命令即为增量模式——通过 git diff 对比上次同步的 commit hash，只处理变动文件：
+
+```bash
+uv run vulndb-mirror crawl-ghsa
+```
+
+### 强制全量重导入
+
+```bash
+uv run vulndb-mirror crawl-ghsa --full
+```
+
+### 相关环境变量
+
+```env
+GHSA_DATA_DIR=./output/ghsa    # advisory-database clone 目录，默认值
+GHSA_SQLITE_PATH=              # 留空则使用 GHSA_DATA_DIR/ghsa.db
+GIT_CLONE_VIA_SSH=false        # true = 使用 SSH 协议
+GIT_PROXY=socks5://127.0.0.1:1080   # 可选，git 操作走代理
+```
+
+---
+
+## 启动 API 服务
 
 ```bash
 uv run vulndb-mirror api
 ```
 
-If port `8787` is already in use:
+如果 `8787` 端口已被占用：
 
 ```bash
 RAWDB_API_PORT=8791 uv run vulndb-mirror api
 ```
 
-Then open:
+启动后访问：
 
-- `http://127.0.0.1:<RAWDB_API_PORT>/docs` for OpenAPI docs (default port is `8787`)
+- `http://127.0.0.1:<RAWDB_API_PORT>/docs`：OpenAPI 文档（默认端口 `8787`）
 
-## Start standalone web UI
+## 启动 Web 前端
 
 ```bash
 cd web
@@ -134,60 +233,96 @@ npm install
 npm run dev
 ```
 
-Web UI: `http://127.0.0.1:3000`
+Web UI：`http://127.0.0.1:3000`
 
-The browser is optimized for vulnerability triage:
-
-- fixed left filter sidebar with summary stats
-- inline detail cards in the list
-- right-side drawer for full CVE details
-- direct hyperlinks for detail / references / patch URLs
-- configurable PoC status heuristics shown per CVE
-- date filters hidden under advanced options
+前端功能：
+- 固定左侧过滤栏，含汇总统计
+- 列表内联详情卡片
+- 右侧抽屉展示完整 CVE 详情
+- 直链跳转详情 / 引用 / patch URL
+- 可配置的 PoC 状态启发式标注
+- 日期过滤收起在高级选项中
 
 ---
 
-## Minimal Env Keys
+## 完整环境变量
 
 ```env
-# Aliyun channel
-MAX_PAGES=200
-PAGE_CONCURRENCY=4
+# 通用
+CHANNEL=cvelistv5
 SYNC_MODE=hybrid
 HEAD_SKIP_OK_PAGES=true
 HEAD_RECHECK_PAGES=10
-DATA_DIR=./output/aliyun_cve
-RAWDB_STORAGE_BACKEND=dual
-RAWDB_API_HOST=127.0.0.1
-RAWDB_API_PORT=8787
 LOG_DIR=./logs
 
-# Trickest channel
+# GitHub API
+GITHUB_TOKEN=ghp_...
+
+# aliyun channel
+MAX_PAGES=200
+PAGE_CONCURRENCY=4
+DATA_DIR=./output/aliyun_cve
+RAWDB_STORAGE_BACKEND=dual
+
+# trickest channel
 TRICKEST_DATA_DIR=./output/trickest_cve
 GIT_CLONE_VIA_SSH=false
 # GIT_PROXY=socks5://127.0.0.1:1080
+
+# cvelistv5 channel
+CVELISTV5_DATA_DIR=./output/cvelistv5
+
+# GHSA channel
+GHSA_DATA_DIR=./output/ghsa
+# GHSA_SQLITE_PATH=
+
+# GitHub 缓存
+GITHUB_SBOM_CONCURRENCY=4
+GITHUB_SBOM_HOURLY_BUDGET=4500
+# GITHUB_SBOM_SQLITE_PATH=
+
+GITHUB_LANGUAGES_CONCURRENCY=4
+GITHUB_LANGUAGES_HOURLY_BUDGET=4500
+# GITHUB_LANGUAGES_SQLITE_PATH=
+
+# API 服务
+RAWDB_API_HOST=127.0.0.1
+RAWDB_API_PORT=8787
 ```
 
-## Output Locations
+## 输出目录
 
 ### aliyun channel
 
-- Raw files: `output/aliyun_cve/raw/CVE-*.json`
-- SQLite DB: `output/aliyun_cve/raw.db`
-- Page/meta state: `output/aliyun_cve/.rawdb.state.json`
-- Logs: `logs/*-crawler.log`
+- 原始文件：`output/aliyun_cve/cve/CVE-*.json`
+- SQLite DB：`output/aliyun_cve/raw.db`
+- 页面/元信息状态：`output/aliyun_cve/.rawdb.state.json`
+- 日志：`logs/*-crawler.log`
 
 ### trickest_cve channel
 
-- Git repo clone: `output/trickest_cve/trickest_repo/`
-- Raw files: `output/trickest_cve/raw/CVE-*.json`
-- SQLite DB: `output/trickest_cve/raw.db`
-- Sync state (last commit): `output/trickest_cve/.trickest_state.json`
+- Git 仓库 clone：`output/trickest_cve/trickest_repo/`
+- 原始文件：`output/trickest_cve/cve/CVE-*.json`
+- SQLite DB：`output/trickest_cve/raw.db`
+- 同步状态（last commit）：`output/trickest_cve/.trickest_state.json`
 
-状态文件/数据库中会新增以下同步游标（自动兼容旧状态）：
+### cvelistv5 channel
 
-- `head_last_stop_page`: 上次前段增量停止页（aliyun）
-- `last_commit` / `last_sync`: 上次同步 commit hash 与时间（trickest）
+- Git 仓库 clone：`output/cvelistv5/cvelistv5_repo/`
+- 原始文件：`output/cvelistv5/cve/CVE-*.json`
+- SQLite DB：`output/cvelistv5/raw.db`
+- 同步状态（last commit）：`output/cvelistv5/.cvelistv5_state.json`
+
+### ghsa channel
+
+- Git 仓库 clone：`output/ghsa/advisory-database/`
+- SQLite DB：`output/ghsa/ghsa.db`（含 `ghsa_entries`、`ghsa_cve_aliases`、`ghsa_affected` 三张表）
+- 同步状态（last commit）：`output/ghsa/.ghsa_state.json`
+
+状态文件/数据库中的同步游标（自动兼容旧状态）：
+
+- `head_last_stop_page`：上次前段增量停止页（aliyun）
+- `last_commit` / `last_sync`：上次同步 commit hash 与时间（trickest / cvelistv5 / ghsa）
 
 ---
 

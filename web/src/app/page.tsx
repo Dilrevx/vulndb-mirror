@@ -4,7 +4,7 @@ import type {
     ChannelId, CheckpointsResp, FilterDraft, GapsResp,
     GithubDepsData, GithubLangsData, LangByLanguageItem,
     PkgByPackageItem, QueryResp, RawItem, RepoGithubData, TabMode,
-    TopPackageItem, TopLanguageItem, CweLanguageStatsItem,
+    TopPackageItem, TopLanguageItem, CweLanguageStatsItem, GhsaRecord,
 } from "@/types";
 import { apiGet, apiPost } from "@/lib/api";
 import {
@@ -18,6 +18,7 @@ import { GitHubRepoCard } from "@/components/GitHubRepoCard";
 import { SearchTab } from "@/tabs/SearchTab";
 import { DebugTab } from "@/tabs/DebugTab";
 import { GithubTab } from "@/tabs/GithubTab";
+import { GhsaTab } from "@/tabs/GhsaTab";
 
 export default function Home() {
     const [activeTab, setActiveTab] = useState<TabMode>("search");
@@ -65,6 +66,16 @@ export default function Home() {
     const [ecosystems, setEcosystems] = useState<string[]>([]);
     const [cweStats, setCweStats] = useState<CweLanguageStatsItem[] | null>(null);
     const [cweStatsLoading, setCweStatsLoading] = useState(false);
+
+    const [ghsaEntries, setGhsaEntries] = useState<GhsaRecord[]>([]);
+    const [ghsaStats, setGhsaStats] = useState<{ total: number; reviewed: number; withdrawn: number; ecosystems: Record<string, number> } | null>(null);
+    const [ghsaStatsLoading, setGhsaStatsLoading] = useState(false);
+    const [ghsaPkgEco, setGhsaPkgEco] = useState("");
+    const [ghsaPkgName, setGhsaPkgName] = useState("");
+    const [ghsaPkgResults, setGhsaPkgResults] = useState<GhsaRecord[] | null>(null);
+    const [ghsaPkgTotal, setGhsaPkgTotal] = useState(0);
+    const [ghsaPkgLoading, setGhsaPkgLoading] = useState(false);
+    const [ghsaPkgError, setGhsaPkgError] = useState("");
 
     const searchTokens = useMemo(() => parseSmartSearch(applied.search), [applied.search]);
 
@@ -250,6 +261,7 @@ export default function Home() {
     async function openDetail(item: RawItem): Promise<void> {
         setSelected(item);
         setRepoData({});
+        setGhsaEntries([]);
         try {
             const data = await apiGet<RawItem>(`/raw/${encodeURIComponent(item.cve_id)}?channel=${channel}`);
             setDetailJson(JSON.stringify(data, null, 2));
@@ -269,6 +281,9 @@ export default function Home() {
                     });
                 }
             }
+            apiGet<{ items: GhsaRecord[] }>(`/ghsa/by-cve/${encodeURIComponent(item.cve_id)}`)
+                .then(d => setGhsaEntries(d.items))
+                .catch(() => {});
         } catch {
             setDetailJson(JSON.stringify(item, null, 2));
         }
@@ -347,6 +362,34 @@ export default function Home() {
         }
     }
 
+    async function loadGhsaStats(): Promise<void> {
+        setGhsaStatsLoading(true);
+        try {
+            const data = await apiGet<{ total: number; reviewed: number; withdrawn: number; ecosystems: Record<string, number> }>("/ghsa/stats").catch(() => null);
+            setGhsaStats(data);
+        } finally {
+            setGhsaStatsLoading(false);
+        }
+    }
+
+    async function searchGhsaByPackage(): Promise<void> {
+        if (!ghsaPkgName.trim()) return;
+        setGhsaPkgLoading(true);
+        setGhsaPkgError("");
+        setGhsaPkgResults(null);
+        try {
+            const params = new URLSearchParams({ package_name: ghsaPkgName.trim() });
+            if (ghsaPkgEco.trim()) params.set("ecosystem", ghsaPkgEco.trim());
+            const data = await apiGet<{ total: number; items: GhsaRecord[] }>(`/ghsa?${params}`);
+            setGhsaPkgResults(data.items);
+            setGhsaPkgTotal(data.total);
+        } catch (e) {
+            setGhsaPkgError(String(e));
+        } finally {
+            setGhsaPkgLoading(false);
+        }
+    }
+
     async function loadTopPackages(eco?: string): Promise<void> {
         setTopStatsLoading(true);
         try {
@@ -400,6 +443,7 @@ export default function Home() {
                         <TabButton label="Aliyun 调试" active={activeTab === "debug"} onClick={() => setActiveTab("debug")} />
                     ) : null}
                     <TabButton label="GitHub 缓存" active={activeTab === "github"} onClick={() => { setActiveTab("github"); void loadGithubStats(); }} />
+                    <TabButton label="GHSA" active={activeTab === "ghsa"} onClick={() => { setActiveTab("ghsa"); void loadGhsaStats(); }} />
                     <div className="ml-auto">
                         <select
                             className="rounded border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700"
@@ -462,6 +506,21 @@ export default function Home() {
                         cweStatsLoading={cweStatsLoading}
                         loadCweStats={() => void loadCweStats()}
                     />
+                ) : activeTab === "ghsa" ? (
+                    <GhsaTab
+                        stats={ghsaStats}
+                        statsLoading={ghsaStatsLoading}
+                        loadStats={() => void loadGhsaStats()}
+                        pkgEco={ghsaPkgEco}
+                        setPkgEco={setGhsaPkgEco}
+                        pkgName={ghsaPkgName}
+                        setPkgName={setGhsaPkgName}
+                        pkgResults={ghsaPkgResults}
+                        pkgTotal={ghsaPkgTotal}
+                        pkgLoading={ghsaPkgLoading}
+                        pkgError={ghsaPkgError}
+                        searchByPackage={() => void searchGhsaByPackage()}
+                    />
                 ) : (
                     <DebugTab
                         cveId={cveId}
@@ -503,6 +562,59 @@ export default function Home() {
                                 </div>
                                 <LabeledLine label="时间" text={`更新 ${selected.modified_date || "-"} / 发布 ${selected.published_date || "-"}`} />
                             </div>
+
+                            {ghsaEntries.length > 0 && (
+                                <div className="space-y-2">
+                                    <div className="text-xs font-semibold uppercase tracking-widest text-slate-400">GHSA 安全公告</div>
+                                    {ghsaEntries.map(entry => (
+                                        <div key={entry.ghsa_id} className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-2">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <a
+                                                    href={`https://github.com/advisories/${entry.ghsa_id}`}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    className="font-mono text-sm font-semibold text-blue-700 hover:underline"
+                                                >
+                                                    {entry.ghsa_id}
+                                                </a>
+                                                {entry.github_reviewed && (
+                                                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">已审核</span>
+                                                )}
+                                                {entry.withdrawn && (
+                                                    <span className="rounded-full bg-rose-100 px-2 py-0.5 text-xs font-medium text-rose-700">已撤销</span>
+                                                )}
+                                            </div>
+                                            {entry.summary && entry.summary !== selected?.description && (
+                                                <p className="text-xs text-slate-600">{entry.summary}</p>
+                                            )}
+                                            {entry.affected.length > 0 && (
+                                                <div className="flex flex-wrap gap-1.5">
+                                                    {entry.affected.map((pkg, i) => (
+                                                        <div key={i} className="rounded border border-slate-200 bg-white px-2 py-1 text-xs">
+                                                            <span className="font-medium text-slate-700">{pkg.ecosystem}/{pkg.package_name}</span>
+                                                            {pkg.version_ranges.map((vr, j) => (
+                                                                <span key={j} className="ml-1.5 font-mono text-slate-500">
+                                                                    {vr.introduced && `introduced: ${vr.introduced}`}
+                                                                    {vr.introduced && (vr.fixed || vr.last_affected) && " → "}
+                                                                    {vr.fixed && `fixed: ${vr.fixed}`}
+                                                                    {!vr.fixed && vr.last_affected && `last_affected: ${vr.last_affected}`}
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            {entry.cwe_ids.length > 0 && (
+                                                <div className="flex flex-wrap gap-1">
+                                                    {entry.cwe_ids.map((cwe) => (
+                                                        <span key={cwe} className="rounded bg-slate-200 px-1.5 py-0.5 font-mono text-xs text-slate-600">{cwe}</span>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
 
                             {Object.keys(repoData).length > 0 && (
                                 <div className="space-y-3">

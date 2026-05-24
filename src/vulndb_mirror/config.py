@@ -237,6 +237,16 @@ class CrawlerSettings(BaseSettings):
         description="Per-process hourly request cap for the languages worker",
     )
 
+    # GHSA channel settings
+    ghsa_data_dir: str = Field(
+        default="./output/ghsa",
+        description="Data directory for the GHSA advisory-database channel",
+    )
+    ghsa_sqlite_path: Optional[str] = Field(
+        default=None,
+        description="SQLite file for GHSA storage. Defaults to <ghsa_data_dir>/ghsa.db",
+    )
+
     # Logging
     log_dir: Optional[str] = Field(
         default="./logs",
