@@ -58,6 +58,10 @@ class CrawlConfig:
     head_skip_ok_pages: bool = True
     head_recheck_pages: int = 10
 
+    # ---- OSV.dev -----------------------------------------------------------
+    osv_token: Optional[str] = None
+    osv_base_url: str = "https://api.osv.dev"
+
     # ---- GitHub API ---------------------------------------------------------
     github_token: Optional[str] = None  # populated from env via CrawlerSettings
 
@@ -237,6 +241,24 @@ class CrawlerSettings(BaseSettings):
         description="Per-process hourly request cap for the languages worker",
     )
 
+    # OSV.dev channel settings
+    osv_data_dir: str = Field(
+        default="./output/osv",
+        description="Data directory for the OSV.dev channel",
+    )
+    osv_token: Optional[str] = Field(
+        default=None,
+        description="OSV.dev API token (reserved for future use)",
+    )
+    osv_base_url: str = Field(
+        default="https://api.osv.dev",
+        description="OSV.dev API base URL",
+    )
+    osv_ecosystems: list[str] = Field(
+        default_factory=lambda: ["PyPI", "Maven"],
+        description="Ecosystems to query on OSV.dev",
+    )
+
     # GHSA channel settings
     ghsa_data_dir: str = Field(
         default="./output/ghsa",
@@ -282,4 +304,6 @@ class CrawlerSettings(BaseSettings):
             head_skip_ok_pages=self.head_skip_ok_pages,
             head_recheck_pages=self.head_recheck_pages,
             github_token=self.github_token,
+            osv_token=self.osv_token,
+            osv_base_url=self.osv_base_url,
         )

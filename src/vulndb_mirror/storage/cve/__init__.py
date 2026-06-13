@@ -19,6 +19,7 @@ from .factory import build_cve_repository
 from .aliyun_ingest import AliyunIngestService
 from .cvelistv5_ingest import CvelistV5IngestService, CvelistV5SyncResult
 from .trickest_ingest import TrickestIngestService
+from .osv_ingest import OsvIngestService, OsvSyncResult
 from .file_storage import CrawlStorage
 
 __all__ = [
@@ -40,5 +41,7 @@ __all__ = [
     "CvelistV5IngestService",
     "CvelistV5SyncResult",
     "TrickestIngestService",
+    "OsvIngestService",
+    "OsvSyncResult",
     "CrawlStorage",
 ]

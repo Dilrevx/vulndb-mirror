@@ -8,7 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from vulndb_mirror.storage.github_deps.ingest_service import (
     GithubSbomIngestService,
 )
-from vulndb_mirror.storage.github_deps.repository import GitHubSbomRepository
+from vulndb_mirror.storage.github_deps.repository import (
+    GitHubSbomRepository,
+    DownstreamFixCommitsRepository,
+)
 from vulndb_mirror.storage.github_language.ingest_service import (
     GithubLanguagesIngestService,
 )
@@ -28,6 +31,7 @@ def create_app(
     languages_service: Optional[GithubLanguagesIngestService] = None,
     ghsa_repo=None,
     ghsa_service=None,
+    downstream_commits_repo: Optional[DownstreamFixCommitsRepository] = None,
 ) -> FastAPI:
     channel_names = list(repositories.keys())
 
@@ -180,10 +184,47 @@ def create_app(
         name: str = Query(..., min_length=1),
         ecosystem: Optional[str] = Query(default=None),
         limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        match_prefix: bool = Query(default=False),
     ):
         return {
             "items": _require_sbom_repo().query_by_package(
-                ecosystem=ecosystem, name=name, limit=limit
+                ecosystem=ecosystem, name=name, limit=limit, offset=offset,
+                match_prefix=match_prefix,
+            )
+        }
+
+    # ---- Downstream commit search ----
+    def _require_downstream_commits_repo() -> DownstreamFixCommitsRepository:
+        if downstream_commits_repo is None:
+            raise HTTPException(
+                status_code=503, detail="downstream-commits not configured"
+            )
+        return downstream_commits_repo
+
+    @app.get("/github-deps/downstream-commits/{owner}/{repo}")
+    def github_deps_downstream_commits(
+        owner: str,
+        repo: str,
+        cve_id: str = Query(..., min_length=1),
+    ):
+        """Search for fix commits referencing *cve_id* in a downstream repo.
+
+        Checks the local cache first; on cache miss, forwards the query to
+        GitHub's ``/search/commits`` endpoint and caches the result.
+        """
+        return _require_downstream_commits_repo().search_and_cache(
+            owner=owner.lower(),
+            repo=repo.lower(),
+            cve_id=cve_id.upper(),
+        )
+
+    @app.get("/github-deps/downstream-commits/list/{owner}/{repo}")
+    def github_deps_downstream_commits_list(owner: str, repo: str):
+        """Return all cached downstream commits for a repo."""
+        return {
+            "items": _require_downstream_commits_repo().list_for_repo(
+                owner=owner.lower(), repo=repo.lower()
             )
         }
 

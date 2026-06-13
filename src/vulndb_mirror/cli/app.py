@@ -19,7 +19,10 @@ from vulndb_mirror.server.api import create_app
 from vulndb_mirror.storage.github_deps.ingest_service import (
     GithubSbomIngestService,
 )
-from vulndb_mirror.storage.github_deps.repository import GitHubSbomRepository
+from vulndb_mirror.storage.github_deps.repository import (
+    GitHubSbomRepository,
+    DownstreamFixCommitsRepository,
+)
 from vulndb_mirror.storage.github_language.ingest_service import (
     GithubLanguagesIngestService,
 )
@@ -30,6 +33,7 @@ from vulndb_mirror.storage.cve.models import now_iso
 from vulndb_mirror.storage.cve.factory import build_cve_repository as build_raw_repository
 from vulndb_mirror.storage.cve.trickest_ingest import TrickestIngestService
 from vulndb_mirror.storage.cve.cvelistv5_ingest import CvelistV5IngestService
+from vulndb_mirror.storage.cve.osv_ingest import OsvIngestService
 from vulndb_mirror.crawler.ghsa.advisory_db import GhsaAdvisoryDbCrawler
 from vulndb_mirror.storage.ghsa.repository import GhsaRepository
 from vulndb_mirror.storage.ghsa.ingest import GhsaIngestService
@@ -60,11 +64,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Vulnerability DB mirror tools")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    crawl_cve = sub.add_parser("crawl-cve", help="crawl CVE data (aliyun / cvelistv5 / trickest_cve)")
+    crawl_cve = sub.add_parser("crawl-cve", help="crawl CVE data (aliyun / cvelistv5 / trickest_cve / osv)")
     crawl_cve.add_argument(
         "--channel",
         default=None,
-        choices=["aliyun", "trickest_cve", "cvelistv5"],
+        choices=["aliyun", "trickest_cve", "cvelistv5", "osv"],
         help="data channel to crawl (default: value of CHANNEL env / 'aliyun')",
     )
     crawl_cve.add_argument(
@@ -84,7 +88,7 @@ def _build_parser() -> argparse.ArgumentParser:
     crawl.add_argument(
         "--channel",
         default=None,
-        choices=["aliyun", "trickest_cve", "cvelistv5"],
+        choices=["aliyun", "trickest_cve", "cvelistv5", "osv"],
         help=argparse.SUPPRESS,
     )
     crawl.add_argument("--start-page", type=int, default=None, help=argparse.SUPPRESS)
@@ -112,7 +116,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--channel",
         nargs="+",
         default=["cvelistv5"],
-        choices=["cvelistv5", "trickest_cve", "aliyun"],
+        choices=["cvelistv5", "trickest_cve", "aliyun", "osv"],
         help="channels to crawl and scan for GitHub repos (default: cvelistv5)",
     )
     sync.add_argument(
@@ -157,7 +161,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--channel",
         nargs="+",
         default=["cvelistv5"],
-        choices=["cvelistv5", "trickest_cve", "aliyun"],
+        choices=["cvelistv5", "trickest_cve", "aliyun", "osv"],
         help="raw repository channels to scan for repos (default: cvelistv5)",
     )
     deps_run.add_argument(
@@ -178,7 +182,7 @@ def _build_parser() -> argparse.ArgumentParser:
     deps_stats.add_argument(
         "--channel",
         default="cvelistv5",
-        choices=["cvelistv5", "trickest_cve", "aliyun"],
+        choices=["cvelistv5", "trickest_cve", "aliyun", "osv"],
     )
 
     langs = sub.add_parser(
@@ -195,7 +199,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--channel",
         nargs="+",
         default=["cvelistv5"],
-        choices=["cvelistv5", "trickest_cve", "aliyun"],
+        choices=["cvelistv5", "trickest_cve", "aliyun", "osv"],
         help="raw repository channels to scan for repos (default: cvelistv5)",
     )
     langs_run.add_argument(
@@ -216,7 +220,7 @@ def _build_parser() -> argparse.ArgumentParser:
     langs_stats.add_argument(
         "--channel",
         default="cvelistv5",
-        choices=["cvelistv5", "trickest_cve", "aliyun"],
+        choices=["cvelistv5", "trickest_cve", "aliyun", "osv"],
     )
     return parser
 
@@ -236,6 +240,8 @@ def _resolve_sbom_sqlite_path(
         base = settings.trickest_data_dir
     elif channel == "aliyun":
         base = settings.data_dir
+    elif channel == "osv":
+        base = settings.osv_data_dir
     else:
         base = settings.cvelistv5_data_dir
     return str(Path(base) / "raw.db")
@@ -268,6 +274,8 @@ def _resolve_languages_sqlite_path(
         base = settings.trickest_data_dir
     elif channel == "aliyun":
         base = settings.data_dir
+    elif channel == "osv":
+        base = settings.osv_data_dir
     else:
         base = settings.cvelistv5_data_dir
     return str(Path(base) / "raw.db")
@@ -338,21 +346,26 @@ def main() -> None:
         aliyun_repo = build_raw_repository(settings)
         trickest_repo = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
         cvelistv5_repo = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
+        osv_repo = build_raw_repository(settings, data_dir=settings.osv_data_dir)
 
         trickest_config = settings.to_crawl_config()
         trickest_config.data_dir = settings.trickest_data_dir
         cv5_config = settings.to_crawl_config()
         cv5_config.data_dir = settings.cvelistv5_data_dir
+        osv_config = settings.to_crawl_config()
+        osv_config.data_dir = settings.osv_data_dir
 
         repositories = {
             "aliyun": aliyun_repo,
             "trickest_cve": trickest_repo,
             "cvelistv5": cvelistv5_repo,
+            "osv": osv_repo,
         }
         services = {
             "aliyun": AliyunIngestService(settings.to_crawl_config(), aliyun_repo),
             "trickest_cve": TrickestIngestService(trickest_config, trickest_repo),
             "cvelistv5": CvelistV5IngestService(cv5_config, cvelistv5_repo),
+            "osv": OsvIngestService(osv_config, osv_repo),
         }
 
         sbom_repo = GitHubSbomRepository(
@@ -377,6 +390,11 @@ def main() -> None:
 
         ghsa_service = _build_ghsa_service(settings)
 
+        downstream_commits_repo = DownstreamFixCommitsRepository(
+            sqlite_path=_resolve_sbom_sqlite_path(settings, channel="cvelistv5"),
+            github_token=settings.github_token,
+        )
+
         app = create_app(
             repositories,
             services,
@@ -386,6 +404,7 @@ def main() -> None:
             languages_service=languages_service,
             ghsa_repo=ghsa_service.repository,
             ghsa_service=ghsa_service,
+            downstream_commits_repo=downstream_commits_repo,
         )
         uvicorn.run(
             app,
@@ -405,6 +424,8 @@ def main() -> None:
                     raw_repos[ch] = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
                 elif ch == "cvelistv5":
                     raw_repos[ch] = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
+                elif ch == "osv":
+                    raw_repos[ch] = build_raw_repository(settings, data_dir=settings.osv_data_dir)
                 else:
                     raw_repos[ch] = build_raw_repository(settings)
             # SBOM cache always lives in the cvelistv5 db (or GITHUB_SBOM_SQLITE_PATH)
@@ -426,6 +447,8 @@ def main() -> None:
                 stats_raw = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
             elif stats_channel == "cvelistv5":
                 stats_raw = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
+            elif stats_channel == "osv":
+                stats_raw = build_raw_repository(settings, data_dir=settings.osv_data_dir)
             else:
                 stats_raw = build_raw_repository(settings)
             sbom_service = _build_sbom_service(settings, stats_raw, channel=stats_channel)
@@ -444,6 +467,8 @@ def main() -> None:
                     raw_repos[ch] = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
                 elif ch == "cvelistv5":
                     raw_repos[ch] = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
+                elif ch == "osv":
+                    raw_repos[ch] = build_raw_repository(settings, data_dir=settings.osv_data_dir)
                 else:
                     raw_repos[ch] = build_raw_repository(settings)
             primary_channel = "cvelistv5" if "cvelistv5" in channels else channels[0]
@@ -464,6 +489,8 @@ def main() -> None:
                 stats_raw = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
             elif stats_channel == "cvelistv5":
                 stats_raw = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
+            elif stats_channel == "osv":
+                stats_raw = build_raw_repository(settings, data_dir=settings.osv_data_dir)
             else:
                 stats_raw = build_raw_repository(settings)
             langs_service = _build_languages_service(settings, stats_raw, channel=stats_channel)
@@ -486,6 +513,8 @@ def main() -> None:
                 raw_repos[ch] = build_raw_repository(settings, data_dir=settings.trickest_data_dir)
             elif ch == "cvelistv5":
                 raw_repos[ch] = build_raw_repository(settings, data_dir=settings.cvelistv5_data_dir)
+            elif ch == "osv":
+                raw_repos[ch] = build_raw_repository(settings, data_dir=settings.osv_data_dir)
             else:
                 raw_repos[ch] = build_raw_repository(settings)
 
@@ -532,6 +561,10 @@ def main() -> None:
                         cfg = settings.to_crawl_config()
                         cfg.data_dir = settings.cvelistv5_data_dir
                         CvelistV5IngestService(cfg, raw_repos[ch]).sync(full=False)
+                    elif ch == "osv":
+                        cfg = settings.to_crawl_config()
+                        cfg.data_dir = settings.osv_data_dir
+                        OsvIngestService(cfg, raw_repos[ch]).sync(full=False)
                     else:
                         AliyunIngestService(settings.to_crawl_config(), raw_repos[ch]).crawl_incremental()
                 except Exception as exc:
@@ -631,6 +664,15 @@ def main() -> None:
             ),
         )
         result = service_cv5.sync(full=args.full)
+        print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
+        return
+
+    if args.command in ("crawl-cve", "crawl") and channel == "osv":
+        repository = build_raw_repository(settings, data_dir=settings.osv_data_dir)
+        osv_config = settings.to_crawl_config()
+        osv_config.data_dir = settings.osv_data_dir
+        service_osv = OsvIngestService(osv_config, repository)
+        result = service_osv.sync(full=args.full if hasattr(args, "full") else False)
         print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
         return
 
