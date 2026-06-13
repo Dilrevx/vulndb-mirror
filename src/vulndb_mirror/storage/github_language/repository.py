@@ -278,6 +278,20 @@ class GitHubLanguagesRepository:
         )
         with self._connect() as conn:
             rows = conn.execute(sql, (language, int(limit), int(offset))).fetchall()
+        # Fallback: try case-insensitive if exact match returns nothing
+        if not rows:
+            sql2 = (
+                "SELECT d.owner, d.repo, d.language, d.bytes, "
+                "       c.priority, c.source_cves, c.fetched_at "
+                "FROM github_languages_data AS d "
+                "JOIN github_languages_cache AS c "
+                "  ON c.owner = d.owner AND c.repo = d.repo "
+                "WHERE LOWER(d.language) = LOWER(?) "
+                "ORDER BY d.bytes DESC, c.priority ASC "
+                "LIMIT ? OFFSET ?"
+            )
+            with self._connect() as conn:
+                rows = conn.execute(sql2, (language, int(limit), int(offset))).fetchall()
         results: list[dict] = []
         for row in rows:
             try:
